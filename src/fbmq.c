@@ -923,8 +923,16 @@ static int scan_and_claim(fbmq_queue_t *q, const char *scan_dir,
         struct timespec claim_ts;
         if (clock_gettime(CLOCK_REALTIME, &claim_ts) != 0)
             return -1;
+
+        /* Strip enqueue timestamp prefix from min_name so claimed path
+         * becomes <claim_ts>.<hash>.md instead of <claim_ts>.<enqueue_ts>.<hash>.md */
+        const char *base = min_name;
+        const char *p = base;
+        while (*p >= '0' && *p <= '9') p++;
+        if (*p == '.' && p > base) base = p + 1;
+
         if (path_fmt(claimed_path, pathlen, "%s/processing/%ld%09ld.%s",
-                     q->root, (long)claim_ts.tv_sec, claim_ts.tv_nsec, min_name) != 0)
+                     q->root, (long)claim_ts.tv_sec, claim_ts.tv_nsec, base) != 0)
             return -1;
 
         if (rename(src, claimed_path) == 0)

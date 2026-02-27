@@ -21,7 +21,7 @@ assert_eq() {
 # Helper: find message file by ID in a bucket directory (handles timestamp prefix)
 find_msg() {
     local dir="$1" id="$2"
-    find "$dir" -name "*.$id.md" -print -quit 2>/dev/null
+    find "$dir" \( -name "$id.md" -o -name "*.$id.md" \) -print -quit 2>/dev/null
 }
 
 echo "╔══════════════════════════════════════╗"
@@ -120,9 +120,9 @@ CLAIMED=$($FBMQ pop "$QUEUE")
 [ -n "$CLAIMED" ] && pass "pop prints path" || fail "pop empty output"
 [ -f "$CLAIMED" ] && pass "claimed file exists" || fail "claimed file missing"
 
-# Verify claimed path format: processing/<claim_ts>.<enqueue_ts>.<hash>.md
+# Verify claimed path format: processing/<claim_ts>.<hash>.md
 CLAIMED_BASE=$(basename "$CLAIMED")
-echo "$CLAIMED_BASE" | grep -qE '^[0-9]+\.[0-9]+\.[0-9a-f]{32}\.md$' && pass "claimed path format" || fail "path format" "$CLAIMED_BASE"
+echo "$CLAIMED_BASE" | grep -qE '^[0-9]+\.[0-9a-f]{32}\.md$' && pass "claimed path format" || fail "path format" "$CLAIMED_BASE"
 
 # Read the claimed message
 head -1 "$CLAIMED" | grep -qE '^[A-Za-z][-A-Za-z0-9]*:' && pass "claimed file has headers" || fail "no headers"
@@ -137,6 +137,11 @@ $FBMQ ack "$QUEUE" "$CLAIMED"
 [ ! -f "$CLAIMED" ] && pass "removed from processing" || fail "still in processing"
 DONE_COUNT=$(find "$QUEUE/done" -name '*.md' | wc -l | tr -d ' ')
 assert_eq "1" "$DONE_COUNT" "1 message in done/"
+# Verify done/ filename is <hash>.md (no timestamps)
+DONE_FILE=$(find "$QUEUE/done" -name '*.md' -print -quit)
+DONE_BASE=$(basename "$DONE_FILE")
+echo "$DONE_BASE" | grep -qE '^[0-9a-f]{32}\.md$' && pass "done: filename is <hash>.md" \
+    || fail "done: unexpected filename format" "$DONE_BASE"
 
 # ── nack → retry ──
 echo ""
@@ -149,11 +154,11 @@ assert_eq "2" "$DEPTH" "depth=2 after nack (returned)"
 
 # Verify retry_count incremented — find the nacked message by ID
 CLAIMED2_BASE=$(basename "$CLAIMED2")
-# Strip claim prefix (first segment) and .md suffix to get enqueue_ts.hash
+# Strip claim prefix (first segment) and .md suffix to get hash
 NACKED_ORIG=$(echo "$CLAIMED2_BASE" | sed 's/^[0-9]*\.//')
-NACKED_ID=$(echo "$NACKED_ORIG" | sed 's/^[0-9]*\.//' | sed 's/\.md$//')
+NACKED_ID=$(echo "$NACKED_ORIG" | sed 's/\.md$//')
 NACKED_BUCKET="${NACKED_ID:0:2}"
-NACKED_FILE=$(find "$QUEUE/pending/$NACKED_BUCKET" -name "*.$NACKED_ID.md" -print -quit)
+NACKED_FILE=$(find_msg "$QUEUE/pending/$NACKED_BUCKET" "$NACKED_ID")
 grep -q "Retry-Count: 1" "$NACKED_FILE" && pass "retry_count=1" || fail "retry_count"
 
 # ── nack → dead-letter ──
@@ -175,6 +180,11 @@ for i in $(seq 1 5); do
 done
 DL_COUNT=$(find "$QUEUE/failed" -name '*.md' | wc -l)
 [ "$DL_COUNT" -ge 1 ] && pass "dead-lettered after max retries" || fail "not dead-lettered" "count=$DL_COUNT"
+# Verify failed/ filename is <hash>.md (no timestamps)
+DL_FILE=$(find "$QUEUE/failed" -name '*.md' -print -quit)
+DL_BASE=$(basename "$DL_FILE")
+echo "$DL_BASE" | grep -qE '^[0-9a-f]{32}\.md$' && pass "failed: filename is <hash>.md" \
+    || fail "failed: unexpected filename format" "$DL_BASE"
 
 # ── pop empty ──
 echo ""
@@ -508,12 +518,71 @@ NACK_CL=$($FBMQ pop "$NACK_QUEUE")
 $FBMQ nack "$NACK_QUEUE" "$NACK_CL"
 # Find the nacked message back in pending
 NACK_BUCKET="${NACK_ID:0:2}"
-NACK_FILE=$(find "$NACK_QUEUE/pending/$NACK_BUCKET" -name "*.$NACK_ID.md" -print -quit)
+NACK_FILE=$(find_msg "$NACK_QUEUE/pending/$NACK_BUCKET" "$NACK_ID")
 [ -n "$NACK_FILE" ] && pass "nack: message returned to pending" || fail "nack: message lost"
-# Verify the filename has the expected format (enqueue_ts.hash.md)
+# Verify the filename has the expected format (hash.md — no enqueue timestamp after nack)
 NACK_BASE=$(basename "$NACK_FILE")
-echo "$NACK_BASE" | grep -qE '^[0-9]+\.[0-9a-f]{32}\.md$' && pass "nack: filename format correct" \
+echo "$NACK_BASE" | grep -qE '^[0-9a-f]{32}\.md$' && pass "nack: filename format correct" \
     || fail "nack: bad filename format" "$NACK_BASE"
+
+# ── timestamp stripping lifecycle ──
+echo ""
+echo "── timestamp stripping lifecycle ──"
+TS_STRIP_QUEUE="$TMPDIR/tsstripq"
+$FBMQ init "$TS_STRIP_QUEUE" 2>/dev/null
+
+# Push: pending/ should have <enqueue_ts>.<hash>.md
+TS_STRIP_ID=$(echo "# Lifecycle test" | $FBMQ push "$TS_STRIP_QUEUE" --no-fsync)
+TS_STRIP_BUCKET="${TS_STRIP_ID:0:2}"
+TS_STRIP_PENDING=$(find_msg "$TS_STRIP_QUEUE/pending/$TS_STRIP_BUCKET" "$TS_STRIP_ID")
+TS_STRIP_PBASE=$(basename "$TS_STRIP_PENDING")
+echo "$TS_STRIP_PBASE" | grep -qE '^[0-9]+\.[0-9a-f]{32}\.md$' \
+    && pass "lifecycle: pending has <enqueue_ts>.<hash>.md" \
+    || fail "lifecycle: pending format" "$TS_STRIP_PBASE"
+
+# Pop: processing/ should have <claim_ts>.<hash>.md (single timestamp, no enqueue ts)
+TS_STRIP_CL=$($FBMQ pop "$TS_STRIP_QUEUE")
+TS_STRIP_CBASE=$(basename "$TS_STRIP_CL")
+echo "$TS_STRIP_CBASE" | grep -qE '^[0-9]+\.[0-9a-f]{32}\.md$' \
+    && pass "lifecycle: processing has <claim_ts>.<hash>.md" \
+    || fail "lifecycle: processing format" "$TS_STRIP_CBASE"
+# Verify exactly 2 dots: <claim_ts>.<hash>.md (not 3 from double timestamp)
+TS_STRIP_DOTS=$(echo "$TS_STRIP_CBASE" | tr -cd '.' | wc -c | tr -d ' ')
+assert_eq "2" "$TS_STRIP_DOTS" "lifecycle: processing filename has exactly 2 dots"
+
+# Ack: done/ should have <hash>.md (no timestamps at all)
+$FBMQ ack "$TS_STRIP_QUEUE" "$TS_STRIP_CL"
+TS_STRIP_DONE=$(find "$TS_STRIP_QUEUE/done" -name '*.md' -print -quit)
+TS_STRIP_DBASE=$(basename "$TS_STRIP_DONE")
+echo "$TS_STRIP_DBASE" | grep -qE '^[0-9a-f]{32}\.md$' \
+    && pass "lifecycle: done has <hash>.md" \
+    || fail "lifecycle: done format" "$TS_STRIP_DBASE"
+assert_eq "$TS_STRIP_ID.md" "$TS_STRIP_DBASE" "lifecycle: done filename is exactly <id>.md"
+
+# Nack path: push another, pop, nack — pending/ should have <hash>.md (no enqueue ts)
+TS_STRIP_ID2=$(echo "# Nack lifecycle" | $FBMQ push "$TS_STRIP_QUEUE" --no-fsync)
+TS_STRIP_CL2=$($FBMQ pop "$TS_STRIP_QUEUE")
+$FBMQ nack "$TS_STRIP_QUEUE" "$TS_STRIP_CL2"
+TS_STRIP_BUCKET2="${TS_STRIP_ID2:0:2}"
+TS_STRIP_NACKED=$(find_msg "$TS_STRIP_QUEUE/pending/$TS_STRIP_BUCKET2" "$TS_STRIP_ID2")
+TS_STRIP_NBASE=$(basename "$TS_STRIP_NACKED")
+echo "$TS_STRIP_NBASE" | grep -qE '^[0-9a-f]{32}\.md$' \
+    && pass "lifecycle: nack-to-pending has <hash>.md" \
+    || fail "lifecycle: nack-to-pending format" "$TS_STRIP_NBASE"
+assert_eq "$TS_STRIP_ID2.md" "$TS_STRIP_NBASE" "lifecycle: nacked filename is exactly <id>.md"
+
+# Dead-letter path: drain queue, nack until dead-lettered, verify failed/ has <hash>.md
+while CL=$($FBMQ pop "$TS_STRIP_QUEUE" 2>/dev/null); do
+    $FBMQ ack "$TS_STRIP_QUEUE" "$CL"
+done
+TS_STRIP_ID3=$(echo "# DL lifecycle" | $FBMQ push "$TS_STRIP_QUEUE" --no-fsync)
+for i in $(seq 1 5); do
+    CL=$($FBMQ pop "$TS_STRIP_QUEUE" 2>/dev/null) || break
+    $FBMQ nack "$TS_STRIP_QUEUE" "$CL" 2>/dev/null || true
+done
+TS_STRIP_DL=$(find "$TS_STRIP_QUEUE/failed" -name "$TS_STRIP_ID3.md" -print -quit)
+[ -n "$TS_STRIP_DL" ] && pass "lifecycle: dead-letter is <hash>.md" \
+    || fail "lifecycle: dead-letter format"
 
 # ── oversized tags field rejected (#11) ──
 echo ""
@@ -698,7 +767,7 @@ while true; do
 done
 assert_eq "70" "$REAP64_POPPED" "reap64: popped all 70"
 # Rename all processing files to have old claim timestamps so reap will collect them
-# Processing filenames: <claim_ts>.<enqueue_ts>.<hash>.md — unique by enqueue_ts+hash
+# Processing filenames: <claim_ts>.<hash>.md — unique by hash
 PAST_TS=$(($(date +%s) - 999999))
 PAST_NS_TS="${PAST_TS}000000000"
 for F in "$REAP64_QUEUE/processing/"*.md; do
