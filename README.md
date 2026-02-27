@@ -4,6 +4,9 @@ A Unix-philosophy message queue where every message is a Markdown file,
 every queue is a directory, and `rename(2)` is the sole coordination
 primitive.
 
+- [NotebookLM](https://notebooklm.google.com/notebook/04836816-b49d-49f1-b451-45ef65d39035) — AI notebook over project sources
+- [DeepWiki](https://deepwiki.com/swiftugandan/fbmq) — Codebase index and navigation
+
 ## Quick Start
 
 ```bash
