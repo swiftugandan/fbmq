@@ -80,158 +80,169 @@ inotifywait -mr pending/                   # monitor
 find done/ -mtime +7 -delete               # purge
 ```
 
-## Use Case: Local Task Backbone for OpenClaw & AI Agents
 
-[OpenClaw](https://github.com/openclaw/openclaw) (150K+ GitHub stars) and
-its derivatives (Clawdbot, Moltbot) are autonomous AI agents that run locally
-and actually *do things* — send emails, manage calendars, browse the web,
-orchestrate multi-step workflows. But every agent needs a task queue. Most
-reach for Redis or a cloud broker. OpenClaw agents don't need that — they need
-a directory.
+### No SDK, no MCP server, no wrapper
 
-fbmq gives your local agents a **persistent, priority-aware, crash-safe task
-queue** where every task is a Markdown file the agent already knows how to
-read. No daemon. No port. No SDK. Just `push`, `pop`, `ack`.
+The CLI _is_ the integration API. Any agent that can run a shell command —
+Claude Code, OpenClaw, a cron job, a bash script — can push, pop, ack, and
+nack without importing a library or standing up a server. stdin, stdout, and
+exit codes are the entire contract. Unix made this decision fifty years ago;
+fbmq just inherits it.
 
-### Why fbmq fits OpenClaw
+#### Step-by-step: Claude Code as a task producer and consumer
 
-| OpenClaw needs | fbmq provides |
-|----------------|---------------|
-| Persistent task memory across sessions | Messages are files — survive reboots, crashes, and restarts |
-| Priority routing (urgent vs. routine) | `--priority` queues: critical → high → normal → low |
-| Multi-agent coordination without race conditions | `rename(2)` — one agent wins the claim, others retry |
-| Failure handling for flaky LLM calls | Auto-retry with dead-letter after N failures |
-| Pipeline correlation (research → act → verify) | `Correlation-Id` ties multi-step chains together |
-| Full observability without a dashboard | `ls pending/`, `cat`, `grep` — the queue is a directory |
+This walkthrough assumes fbmq is built and installed (`make && sudo make install`).
+Claude Code uses its **Bash** tool for every step — no SDK, no plugin, nothing
+else to set up.
 
-### Architecture
+**Step 1 — Create a queue.** Tell Claude Code:
 
-```mermaid
-flowchart TB
-  User([You — WhatsApp / Telegram / CLI])
-  User -->|"fbmq push"| Queue["/var/queue/agents<br>pending/00..ff/"]
+> Create a queue at /tmp/demo
 
-  Queue -->|"fbmq pop"| Researcher[🔍 Research Agent]
-  Queue -->|"fbmq pop"| Builder[🛠️ Builder Agent]
-  Queue -->|"fbmq pop"| Monitor[📡 Monitor Agent]
-
-  Researcher -->|"push follow-up tasks"| Queue
-  Builder -->|"ack / nack"| Queue
-  Monitor -->|"push alerts"| Queue
-
-  Queue -.->|"failed after 3 retries"| Failed["failed/ — dead-letter"]
-  Queue -.->|"completed"| Done["done/ — audit trail"]
-```
-
-### Example: Multi-agent research pipeline
-
-An orchestrator pushes a research request. A research agent picks it up,
-gathers findings, and pushes a follow-up task for a builder agent to act on.
-`Correlation-Id` ties the whole pipeline together. If the LLM call fails,
-`nack` retries it — and dead-letters it after 3 attempts.
-
-**1. Initialize a priority queue:**
+Claude Code runs:
 
 ```bash
-fbmq init /var/queue/agents --priority
+fbmq init /tmp/demo
 ```
 
-**2. Push tasks with tags, priority, and correlation:**
+This creates the directory structure (`pending/`, `processing/`, `done/`,
+`failed/`, `.tmp/`) inside `/tmp/demo`.
+
+**Step 2 — Push a task.** Tell Claude Code:
+
+> Push a high-priority task to summarize a document
+
+Claude Code runs:
 
 ```bash
-PIPELINE="research-$(date +%s)"
-
-# Research task — high priority
-cat <<'EOF' | fbmq push /var/queue/agents -T researcher -p high -c "$PIPELINE"
-# Competitive landscape analysis
-
-Find the top 5 alternatives to our product. For each, extract:
-- Pricing tiers
-- Key differentiators
-- Recent funding or acquisitions
-
-Output findings as structured Markdown.
-EOF
-
-# Builder task — queued at normal, runs after research
-cat <<'EOF' | fbmq push /var/queue/agents -T builder -p normal -c "$PIPELINE"
-# Build comparison dashboard
-
-Using the research findings from this pipeline, generate a
-single-page HTML dashboard comparing all 5 competitors.
-EOF
+echo "Summarize the Q4 earnings report at ~/documents/q4.pdf" \
+  | fbmq push /tmp/demo -p high
 ```
 
-**3. Each message is a human-readable Markdown file on disk:**
+`push` reads the message body from stdin and prints the 32-character message
+ID to stdout:
 
-```markdown
-Id: a3f2e1b4c5d6a7b8c9d0e1f2a3b4c5d6
-Created-At: 2026-02-27T10:30:01.123456789Z
-Priority: high
-Tags: researcher
-Correlation-Id: research-1740652201
-Retry-Count: 0
-
-# Competitive landscape analysis
-
-Find the top 5 alternatives to our product. For each, extract:
-- Pricing tiers
-- Key differentiators
-- Recent funding or acquisitions
-
-Output findings as structured Markdown.
+```
+a3f2e1b4c5d6a7b8c9d0e1f2a3b4c5d6
 ```
 
-**4. Agent consumer loop — works with OpenClaw, Claude CLI, or any agent:**
+The message is now a Markdown file sitting in one of the 256 `pending/`
+buckets.
+
+**Step 3 — Pop the next task.** Tell Claude Code:
+
+> Pop the next task from the queue
+
+Claude Code runs:
 
 ```bash
-QUEUE=/var/queue/agents
-AGENT=researcher   # or builder / monitor
-
-while CLAIMED=$(fbmq pop "$QUEUE"); [ -n "$CLAIMED" ] && [ -f "$CLAIMED" ]; do
-  if grep -q "Tags:.*$AGENT" "$CLAIMED"; then
-    BODY=$(fbmq cat "$CLAIMED")
-
-    # Feed task to your agent (OpenClaw, Claude API, local LLM, etc.)
-    if echo "$BODY" | openclaw run --skill research 2>/dev/null; then
-      fbmq ack "$QUEUE" "$CLAIMED"    # done → done/
-    else
-      fbmq nack "$QUEUE" "$CLAIMED"   # retry → pending/ or failed/
-    fi
-  else
-    fbmq nack "$QUEUE" "$CLAIMED"     # not for this agent — return it
-  fi
-done
+TASK=$(fbmq pop /tmp/demo)
+echo "$TASK"
 ```
 
-**5. Observe everything with Unix tools:**
+`pop` atomically claims the highest-priority pending message and prints its
+full filesystem path:
+
+```
+/tmp/demo/processing/1719500000-a3f2e1b4c5d6a7b8c9d0e1f2a3b4c5d6.md
+```
+
+The message has moved from `pending/` to `processing/`. No other consumer
+can claim it.
+
+**Step 4 — Read the task body.** Tell Claude Code:
+
+> Read that task so I can see what it says
+
+Claude Code runs:
 
 ```bash
-fbmq depth /var/queue/agents             # how many tasks pending?
-grep -rl "Tags:.*researcher" pending/    # find all research tasks
-grep -rl "Correlation-Id: research-1740" done/  # trace a pipeline
-ls failed/                                # what died?
-cat failed/*.md                           # why did it die?
+fbmq cat "$TASK"
 ```
 
-### More agent patterns fbmq enables
+`cat` strips the RFC 822 headers and prints only the body:
 
-| Pattern | How |
-|---------|-----|
-| **Morning briefing** (news + calendar + tasks) | Cron pushes a `briefing` task nightly; agent pops at 7am, assembles digest |
-| **Multi-agent content factory** | `researcher` → `writer` → `editor` agents, chained via `Correlation-Id` |
-| **Self-healing infra** | Monitor agent pushes `critical` alerts; repair agent pops and acts |
-| **Inbox triage** | Email watcher pushes each message; classifier agent tags and routes |
-| **RAG knowledge ingestion** | Drop URLs as tasks; agent pops, scrapes, chunks, and indexes |
-| **Human-in-the-loop review** | Agent pushes results to a `review` queue; human inspects with `cat`, then `ack` or `nack` |
+```
+Summarize the Q4 earnings report at ~/documents/q4.pdf
+```
 
-### Why not Redis / RabbitMQ / a cloud queue?
+(To see the full headers too, use `fbmq inspect "$TASK"` instead — it prints
+ID, priority, creation time, retry count, tags, and body size.)
 
-OpenClaw runs on your machine. fbmq runs on your filesystem. There's nothing
-to install, no daemon to babysit, no port to expose, no credentials to leak.
-Your entire agent state is `ls` and `cat`. Move a message from `failed/` to
-`pending/` with `mv`. Edit a task mid-flight with `vim`. Pipe the dead-letter
-queue to your LLM for root-cause analysis. Try that with Redis.
+**Step 5a — Ack on success.** After the work is done, tell Claude Code:
+
+> Mark that task as done
+
+Claude Code runs:
+
+```bash
+fbmq ack /tmp/demo "$TASK"
+```
+
+The message moves from `processing/` to `done/`. It is finished.
+
+**Step 5b — Nack on failure.** If something went wrong instead:
+
+> That task failed, nack it
+
+Claude Code runs:
+
+```bash
+fbmq nack /tmp/demo "$TASK"
+```
+
+The message moves from `processing/` to `failed/` (the dead-letter queue).
+
+**Step 6 — Check queue depth.** Tell Claude Code:
+
+> How many tasks are in the queue?
+
+Claude Code runs:
+
+```bash
+fbmq depth /tmp/demo
+```
+
+`depth` counts all pending messages across the 256 buckets and prints a
+single number:
+
+```
+3
+```
+
+**Step 7 — Inspect failed tasks.** Tell Claude Code:
+
+> List the failed tasks and show me what went wrong
+
+Claude Code runs:
+
+```bash
+ls /tmp/demo/failed/
+```
+
+```
+1719500000-a3f2e1b4c5d6a7b8c9d0e1f2a3b4c5d6.md
+```
+
+Then to see the metadata of a specific failure:
+
+```bash
+fbmq inspect /tmp/demo/failed/1719500000-a3f2e1b4c5d6a7b8c9d0e1f2a3b4c5d6.md
+```
+
+```
+ID:             a3f2e1b4c5d6a7b8c9d0e1f2a3b4c5d6
+Bucket:         a3
+Created:        2026-02-26T14:30:01.123456789Z
+Created by:     28431@worker-12
+Priority:       high
+Retry count:    0
+Body:           58 bytes
+```
+
+That's it. Every interaction is a plain shell command. No wrapper, no
+configuration file, no running daemon. The same commands work from any agent,
+any shell, any language that can exec a process.
 
 ## Cron
 
