@@ -1,8 +1,9 @@
-# fbmq — File-Based Message Queue
+# fbmq — A message queue for local agents
 
-A Unix-philosophy message queue where every message is a Markdown file,
-every queue is a directory, and `rename(2)` is the sole coordination
-primitive.
+A file-based queue for local AI agents and workers: no broker, no cloud—just
+directories and Markdown. Every message is a file, every queue is a directory,
+and `rename(2)` is the sole coordination primitive. Ideal for local LLM
+pipelines, cron workers, and multi-step agent workflows.
 
 - [NotebookLM](https://notebooklm.google.com/notebook/04836816-b49d-49f1-b451-45ef65d39035) — AI notebook over project sources
 - [DeepWiki](https://deepwiki.com/swiftugandan/fbmq) — Codebase index and navigation
@@ -78,6 +79,65 @@ mv failed/a3f2...md pending/a3/a3f2...md   # manual retry
 inotifywait -mr pending/                   # monitor
 find done/ -mtime +7 -delete               # purge
 ```
+
+## Example: agent harness (Claude, Cursor, OpenCode)
+
+One process (or a human) pushes tasks with a tag indicating which agent should
+handle them; each agent runs a loop: pop, process the claimed file, ack or
+nack. No broker—just the shared queue directory.
+
+```mermaid
+flowchart LR
+  Producer --> Queue[fbmq queue]
+  Queue --> Cursor
+  Queue --> Claude
+  Queue --> OpenCode
+```
+
+**Task format.** Tag each message so agents can route: use `-T cursor`, `-T claude`, or `-T opencode` when pushing. The body is the instruction. Use `Correlation-Id` for multi-step pipelines (e.g. design → implement → test).
+
+```markdown
+Id: a1b2c3d4e5f6...
+Tags: cursor
+Correlation-Id: pipeline-42
+
+# Implement login in src/auth.c
+
+Add a login function that validates credentials and returns a session token.
+```
+
+**Producer:** push tasks to the same queue with different tags:
+
+```bash
+echo "Implement login in src/auth.c" | fbmq push /var/queue/agents -T cursor -p high
+echo "Review the API design in docs/spec.md" | fbmq push /var/queue/agents -T claude -p normal
+echo "Add unit tests for src/auth.c" | fbmq push /var/queue/agents -T opencode -p normal
+```
+
+**Consumer loop.** Each agent runs the same pattern: pop, check if the tag matches this agent, process, then ack (or nack to return the message to the queue).
+
+```bash
+QUEUE=/var/queue/agents
+AGENT=cursor   # or claude / opencode
+
+while CLAIMED=$(fbmq pop "$QUEUE"); [ -n "$CLAIMED" ] && [ -f "$CLAIMED" ]; do
+  if grep -q "Tags:.*$AGENT" "$CLAIMED"; then
+    # Agent-specific work (placeholder — plug in your integration):
+    # Cursor: pass $CLAIMED as task/context; Cursor edits repo; ack on success
+    # Claude: send body to Claude API/CLI; write reply; ack
+    # OpenCode: run OpenCode with task from $CLAIMED; ack on success
+    fbmq ack "$QUEUE" "$CLAIMED"
+  else
+    fbmq nack "$QUEUE" "$CLAIMED"
+  fi
+done
+```
+
+- **Cursor:** Pass `$CLAIMED` to Cursor as context or task file; Cursor edits the repo; ack when done.
+- **Claude:** Send the message body to the Claude API (or CLI), append or write the reply; ack.
+- **OpenCode:** Run OpenCode with the task from `$CLAIMED`; ack on success.
+
+Run the producer (script or manual `fbmq push`); run each agent's loop in a separate terminal or under systemd/cron. Use `fbmq depth /var/queue/agents` to inspect backlog.
 
 ## Cron
 
