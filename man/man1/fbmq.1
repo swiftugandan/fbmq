@@ -1,0 +1,125 @@
+.TH FBMQ 1 "February 2026" "fbmq 1.0.0" "User Commands"
+.SH NAME
+fbmq \- file-based message queue
+.SH SYNOPSIS
+.B fbmq
+.I command
+.RI [ options ]
+.SH DESCRIPTION
+.B fbmq
+is a Unix-philosophy message queue where every message is a Markdown file with
+RFC 822 headers, every queue is a directory, and atomic
+.BR rename (2)
+is the sole coordination primitive.
+.PP
+Messages are human-readable, renderable, greppable, and diffable.
+.SH COMMANDS
+.TP
+.BI "init " "dir " "[--priority]"
+Initialize a new queue with 256 hash-sharded buckets. With
+.B --priority
+creates priority subdirectories (0-critical, 1-high, 2-normal, 3-low).
+.TP
+.BI "push " "dir " "[options] [file|-]"
+Enqueue a message. Reads Markdown body from
+.I file
+or stdin. Prints the message ID to stdout.
+.RS
+.TP
+.BR \-p ", " \-\-priority " " \fIlevel\fR
+One of:
+.IR critical ,
+.IR high ,
+.IR normal
+(default),
+.IR low .
+.TP
+.BR \-t ", " \-\-ttl " " \fIseconds\fR
+Time-to-live.
+.TP
+.BR \-c ", " \-\-correlation\-id " " \fIid\fR
+Correlation ID for workflow tracing.
+.TP
+.BR \-T ", " \-\-tag " " \fItag\fR
+Add a tag (repeatable).
+.TP
+.BR \-b ", " \-\-created\-by " " \fIname\fR
+Override default created_by.
+.TP
+.BR \-\-no\-fsync
+Skip fsync for tmpfs/RAM-disk mode.
+.TP
+.BR \-\-batch\-fsync
+Defer directory fsyncs. File data is still fsynced (message content is durable),
+but the directory entry is not fsynced until
+.B fbmq sync
+is called. When used with a standalone
+.B push
+command, sync is called automatically after enqueue.
+.RE
+.TP
+.TP
+.BI "sync " "dir"
+Flush deferred directory fsyncs for all pending buckets, processing/, and failed/.
+Use after a batch of
+.B push \-\-batch\-fsync
+calls to ensure directory entries are durable. The kernel coalesces these into a
+single journal transaction, so one
+.B sync
+covers all preceding enqueues.
+.TP
+.BI "pop " "dir"
+Claim the next available message. Prints the claimed file path to stdout.
+The message is on disk \(em read it with
+.BR cat (1)
+or
+.BR "fbmq cat" .
+Exit 0 on success, 1 if empty.
+.TP
+.BI "ack " "dir path"
+Mark a claimed message as done.
+.TP
+.BI "nack " "dir path"
+Return a message for retry. Increments retry_count. Dead-letters after max retries.
+.TP
+.BI "depth " "dir"
+Print queue depth. Scans all 256 pending buckets and processing/ on each call.
+Stateless \(em no persistent counter files.
+.TP
+.BI "reap " "dir " "[-l secs]"
+Reclaim stale processing messages and expire TTL-exceeded pending messages.
+.TP
+.BI "purge " "dir " "[-a secs]"
+Delete done messages older than
+.I secs
+(default: 604800 = 7 days).
+.TP
+.BI "inspect " "file"
+Print parsed metadata from a message file.
+.TP
+.BI "cat " "file"
+Print only the Markdown body (strips frontmatter).
+.TP
+.B version
+Print version.
+.SH EXAMPLES
+.nf
+$ fbmq init /var/queue/jobs
+
+$ echo "# Deploy v2.1" | fbmq push /var/queue/jobs \-p high
+a3f2e1b4c5d6a7b8c9d0e1f2a3b4c5d6
+
+$ CLAIMED=$(fbmq pop /var/queue/jobs)
+$ cat "$CLAIMED"              # read the message
+$ fbmq ack /var/queue/jobs "$CLAIMED"
+
+# Or on failure:
+$ fbmq nack /var/queue/jobs "$CLAIMED"
+.fi
+.SH EXIT STATUS
+0 = success, 1 = empty queue (pop) or error.
+.SH SEE ALSO
+.BR fbmq-message (5),
+.BR fbmq-design (7),
+.BR rename (2),
+.BR inotifywait (1)

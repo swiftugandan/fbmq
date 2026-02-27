@@ -1,0 +1,21 @@
+# Build artifacts (make / make clean)
+build/
+fbmq
+libfbmq.a
+libfbmq.so
+libfbmq.so.*
+libfbmq.dylib
+libfbmq.*.dylib
+fbmq.pc
+
+# Object files (if any stray)
+*.o
+*.a
+
+# OS and editor cruft
+.DS_Store
+*.swp
+*.swo
+*~
+.idea/
+.vscode/

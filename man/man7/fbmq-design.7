@@ -1,0 +1,42 @@
+.TH FBMQ-DESIGN 7 "February 2026" "fbmq 1.0.0" "Miscellaneous"
+.SH NAME
+fbmq-design \- architecture and design rationale
+.SH DESCRIPTION
+.B fbmq
+is a file-based message queue. Each queue is a directory. Each message is a
+Markdown file. Atomic
+.BR rename (2)
+is the sole coordination primitive.
+.SH DIRECTORY LAYOUT
+.nf
+<queue>/
+    pending/00..ff/     256 hash-sharded buckets
+    processing/         Claimed (timestamp-prefixed)
+    done/               Completed
+    failed/             Dead-letter
+    .tmp/               Atomic write staging
+.fi
+.SH IDENTITY
+Message ID = md5(timestamp + PID + random bytes). First two hex chars = bucket.
+Entropy from getrandom(2) with /dev/urandom fallback.
+.SH CONCURRENCY
+Lock-free critical path.
+.BR rename (2)
+is atomic \(em one consumer wins, others get ENOENT.
+Depth is computed statelessly by scanning all 256 pending buckets plus
+processing/ on each call. No persistent state files are needed.
+.SH RELIABILITY
+At-least-once delivery. Lease-based reaping. Dead-letter after max retries.
+TTL expiry for time-bounded messages.
+.SH PERFORMANCE
+.TS
+l l l.
+Mode	Throughput	Durability
+_
+tmpfs, --no-fsync	100K+ msg/s	None
+SSD, batched fsync	30-50K msg/s	Per batch
+SSD, per-msg fsync	200-500 msg/s	Full
+.TE
+.SH SEE ALSO
+.BR fbmq (1),
+.BR fbmq-message (5)

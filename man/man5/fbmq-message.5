@@ -1,0 +1,71 @@
+.TH FBMQ-MESSAGE 5 "February 2026" "fbmq 1.0.0" "File Formats"
+.SH NAME
+fbmq-message \- fbmq message file format
+.SH DESCRIPTION
+An
+.B fbmq
+message is a Markdown file (.md) with RFC 822 headers.
+.SH FORMAT
+.nf
+Id: a3f2e1b4c5d6a7b8c9d0e1f2a3b4c5d6
+Created-At: 2026-02-26T14:30:01.123456789Z
+Created-By: 28431@worker-12
+Priority: normal
+Retry-Count: 0
+TTL: 3600
+Tags: orders, processing
+Correlation-Id: req-abc-123
+Custom:
+  order_id: 12345
+
+# Order Processing Request
+
+Process order **12345**.
+.fi
+.SH FIELDS
+.TP
+.B id
+(required) md5 hash. First two hex chars = bucket shard.
+.TP
+.B created_at
+(required) ISO 8601 with nanoseconds.
+.TP
+.B created_by
+(required) Default: pid@hostname.
+.TP
+.B priority
+critical | high | normal | low. Default: normal.
+.TP
+.B retry_count
+Delivery attempts. Default: 0.
+.TP
+.B ttl
+Seconds from created_at. 0 = no expiry.
+.TP
+.B tags
+Comma-separated list of labels.
+.TP
+.B correlation_id
+Workflow tracing ID.
+.TP
+.B custom
+Arbitrary continuation lines. Passed through by the queue.
+.SH FILENAME
+.nf
+a3f2e1b4c5d6a7b8c9d0e1f2a3b4c5d6.md
+^^
+bucket shard
+
+In processing/:
+1740000001.a3f2e1b4c5d6a7b8c9d0e1f2a3b4c5d6.md
+^^^^^^^^^^
+claim timestamp
+.fi
+.SH HEADER FORMAT
+fbmq uses RFC 822-style headers: field names are case-insensitive, separated
+from values by a colon and space. Headers end at the first blank line.
+Continuation lines (starting with whitespace) are supported under
+.BR Custom: .
+.SH SEE ALSO
+.BR fbmq (1),
+.BR fbmq-design (7)

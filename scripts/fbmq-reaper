@@ -1,0 +1,31 @@
+#!/bin/sh
+# fbmq-reaper — Cron-ready reaper for stale and expired messages
+#
+# Usage: fbmq-reaper <queue-dir> [lease-seconds] [purge-age-seconds]
+#
+# Crontab:
+#   * * * * * /usr/local/bin/fbmq-reaper /var/queue/jobs 300 604800
+
+set -eu
+
+QUEUE="${1:?Usage: fbmq-reaper <queue-dir> [lease-secs] [purge-age-secs]}"
+LEASE="${2:-300}"
+PURGE_AGE="${3:-604800}"
+
+FBMQ="${FBMQ:-$(command -v fbmq)}" || { echo "fbmq-reaper: fbmq not found in PATH" >&2; exit 1; }
+
+REAP_OUT=$("$FBMQ" reap "$QUEUE" -l "$LEASE" 2>&1)
+REAP_RC=$?
+if [ "$REAP_RC" -ne 0 ]; then
+    echo "fbmq-reaper: reap failed (exit $REAP_RC): $REAP_OUT" >&2
+    exit "$REAP_RC"
+fi
+echo "$REAP_OUT" >&2
+
+PURGE_OUT=$("$FBMQ" purge "$QUEUE" -a "$PURGE_AGE" 2>&1)
+PURGE_RC=$?
+if [ "$PURGE_RC" -ne 0 ]; then
+    echo "fbmq-reaper: purge failed (exit $PURGE_RC): $PURGE_OUT" >&2
+    exit "$PURGE_RC"
+fi
+echo "$PURGE_OUT" >&2
