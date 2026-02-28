@@ -244,6 +244,70 @@ That's it. Every interaction is a plain shell command. No wrapper, no
 configuration file, no running daemon. The same commands work from any agent,
 any shell, any language that can exec a process.
 
+## Using fbmq with the Pi Coding Agent
+
+[Pi](https://github.com/mariozechner/pi-coding-agent) is an extensible AI
+coding agent that speaks bash natively — which means it already knows how to
+use fbmq. This repo ships a ready-made agent skill at
+`.agents/skills/integrating-pi-sdk/` that teaches Pi (and compatible agents)
+how to manage queues, push tasks, and process work.
+
+### The simplest setup: drop in a skill file
+
+Create `.pi/skills/queue/SKILL.md` in your project with fbmq's commands and
+conventions. Pi reads this file on demand and uses its built-in `bash` tool
+to run fbmq — zero code required.
+
+```bash
+# Copy the skill template into your project
+mkdir -p .pi/skills/queue
+cp .agents/skills/integrating-pi-sdk/SKILL.md .pi/skills/queue/SKILL.md
+```
+
+Then just tell Pi what you need in plain language:
+
+> "Initialize a priority queue at .queue/ and push three tasks for the
+> refactoring we discussed"
+
+Pi reads the skill, runs `fbmq init`, `fbmq push`, and you're done.
+
+### Going further: TypeScript extension
+
+For tighter integration, a Pi extension registers fbmq as native LLM tools
+(`queue_push`, `queue_pop`, `queue_complete`, `queue_depth`) and adds two
+slash commands:
+
+- **`/plan refactor the auth module`** — Pi analyzes the code and pushes
+  prioritized sub-tasks to the queue
+- **`/work`** — Pi pops tasks one by one, does the work, and acks each on
+  completion
+
+See `.agents/skills/integrating-pi-sdk/reference/extension.md` for the full
+TypeScript source you can drop into `.pi/extensions/fbmq.ts`.
+
+### Headless workers: fully automated processing
+
+For background automation, embed Pi as a Node.js library and drive it with
+fbmq in a poll loop:
+
+```
+fbmq pop → fbmq cat → Pi session.prompt() → fbmq ack / nack
+```
+
+Run it as a daemon with `pm2` or `systemd`. Any process can push tasks to the
+queue and the worker processes them autonomously. See
+`.agents/skills/integrating-pi-sdk/reference/sdk-worker.md` for the complete
+implementation.
+
+### Which approach should I pick?
+
+| I want to… | Use |
+|---|---|
+| Get started in 2 minutes | Skill (just a SKILL.md) |
+| Have `/plan` and `/work` commands | Extension (TypeScript) |
+| Run an unattended agent worker | SDK worker (Node.js) |
+| Integrate from Python / C / shell | RPC mode (`pi --rpc` + fbmq CLI) |
+
 ## Cron
 
 ```crontab
