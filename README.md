@@ -244,6 +244,87 @@ That's it. Every interaction is a plain shell command. No wrapper, no
 configuration file, no running daemon. The same commands work from any agent,
 any shell, any language that can exec a process.
 
+## Background Worker with Claude
+
+`fbmq-worker` polls a queue and pipes each task to a command. Pair it with
+`claude -p` for an autonomous agent that processes work in the background.
+
+**1 — Build and install:**
+
+```bash
+make && sudo make install
+```
+
+**2 — Create a queue and a handler script:**
+
+```bash
+fbmq init /tmp/tasks
+
+cat > /tmp/handle.sh << 'EOF'
+#!/bin/sh
+claude -p "$(cat)"
+EOF
+chmod +x /tmp/handle.sh
+```
+
+The handler receives the message body on stdin, passes it to Claude in
+print mode, and exits. Exit 0 → ack (done). Non-zero → nack (retry).
+
+**3 — Start the worker:**
+
+```bash
+fbmq-worker -v /tmp/tasks /tmp/handle.sh &
+```
+
+`-v` logs claim/ack/nack events to stderr. The worker polls every 5 seconds
+by default (override with `-p SECS`).
+
+**4 — Push tasks:**
+
+```bash
+echo "List the top 5 sorting algorithms" | fbmq push /tmp/tasks
+echo "Explain the CAP theorem in one paragraph" | fbmq push /tmp/tasks -p high
+echo "Write a haiku about file systems" | fbmq push /tmp/tasks
+```
+
+The worker picks up each task, runs Claude, and acks on success.
+
+**5 — Check results:**
+
+```bash
+fbmq depth /tmp/tasks   # 0 when all tasks are processed
+ls /tmp/tasks/done/      # completed messages
+ls /tmp/tasks/failed/    # anything that failed
+```
+
+**Capture output to files:**
+
+```bash
+cat > /tmp/handle.sh << 'EOF'
+#!/bin/sh
+ID=$(basename "$FBMQ_TASK_PATH" .md)
+claude -p "$(cat)" > "/tmp/results/$ID.md"
+EOF
+mkdir -p /tmp/results
+```
+
+**Run as a daemon:**
+
+```bash
+nohup fbmq-worker -v /tmp/tasks /tmp/handle.sh >> /tmp/worker.log 2>&1 &
+```
+
+**Process a fixed batch:**
+
+```bash
+fbmq-worker -n 10 /tmp/tasks /tmp/handle.sh   # stop after 10 tasks
+fbmq-worker -1 /tmp/tasks /tmp/handle.sh       # one-shot
+```
+
+See `man fbmq-worker` for all options.
+
+For advanced multi-agent architectures, see [AGENT-PATTERNS.md](AGENT-PATTERNS.md) — complete examples for all of Anthropic's agent design patterns using fbmq.
+
 ## Using fbmq with the Pi Coding Agent
 
 [Pi](https://github.com/mariozechner/pi-coding-agent) is an extensible AI

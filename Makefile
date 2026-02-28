@@ -136,6 +136,9 @@ install-bin: $(BIN)
 	install -m 644 man/man7/fbmq-design.7 $(DESTDIR)$(MANDIR)/man7/fbmq-design.7
 	install -d $(DESTDIR)$(BINDIR)
 	install -m 755 scripts/fbmq-reaper $(DESTDIR)$(BINDIR)/fbmq-reaper
+	install -m 755 scripts/fbmq-worker $(DESTDIR)$(BINDIR)/fbmq-worker
+	install -d $(DESTDIR)$(MANDIR)/man1
+	install -m 644 man/man1/fbmq-worker.1 $(DESTDIR)$(MANDIR)/man1/fbmq-worker.1
 
 install-lib: libs
 	install -d $(DESTDIR)$(LIBDIR)
@@ -153,6 +156,8 @@ install-lib: libs
 uninstall:
 	rm -f $(DESTDIR)$(BINDIR)/$(BIN)
 	rm -f $(DESTDIR)$(BINDIR)/fbmq-reaper
+	rm -f $(DESTDIR)$(BINDIR)/fbmq-worker
+	rm -f $(DESTDIR)$(MANDIR)/man1/fbmq-worker.1
 	rm -f $(DESTDIR)$(MANDIR)/man1/fbmq.1
 	rm -f $(DESTDIR)$(MANDIR)/man5/fbmq-message.5
 	rm -f $(DESTDIR)$(MANDIR)/man7/fbmq-design.7

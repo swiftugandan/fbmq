@@ -1,0 +1,81 @@
+.TH FBMQ-WORKER 1 "February 2026" "fbmq 1.0.0" "User Commands"
+.SH NAME
+fbmq-worker \- poll an fbmq queue and run a command for each task
+.SH SYNOPSIS
+.B fbmq-worker
+.RB [ \-p
+.IR secs ]
+.RB [ \-n
+.IR count ]
+.RB [ \-1 ]
+.RB [ \-v ]
+.I queue-dir
+.I command
+.RI [ args... ]
+.SH DESCRIPTION
+.B fbmq-worker
+polls an
+.BR fbmq (1)
+queue directory for pending tasks. When a task is available, it pops the
+message, pipes its body to the given command's stdin, and acks or nacks
+based on the command's exit status.
+.PP
+Exit 0 from the command triggers an ack (message moves to done/).
+Any non-zero exit triggers a nack (message returns to pending/ for retry,
+or moves to failed/ after max retries).
+.SH OPTIONS
+.TP
+.BI \-p " secs"
+Poll interval in seconds when the queue is empty. Default: 5.
+.TP
+.BI \-n " count"
+Exit after processing
+.I count
+tasks. Default: 0 (unlimited).
+.TP
+.B \-1
+Process one task and exit. Alias for
+.BR "\-n 1" .
+.TP
+.B \-v
+Verbose logging to stderr. Logs poll, claim, ack, and nack events.
+.SH ENVIRONMENT
+The following environment variables are set for the command:
+.TP
+.B FBMQ_TASK_PATH
+Full path to the claimed message file in processing/.
+.TP
+.B FBMQ_QUEUE
+The queue directory.
+.PP
+The worker itself uses:
+.TP
+.B FBMQ
+Path to the fbmq binary. Defaults to
+.BR fbmq (1)
+found in PATH.
+.SH EXAMPLES
+.nf
+# Process build tasks
+fbmq-worker /var/queue/builds ./handle-build.sh
+
+# One-shot with verbose output
+fbmq-worker -1 -v /var/queue/jobs my-handler
+
+# Custom poll interval, pass args to command
+fbmq-worker -p 10 /var/queue/deploys deploy.sh --env production
+
+# Process 5 tasks and exit
+fbmq-worker -n 5 /var/queue/jobs process-task
+.fi
+.SH EXIT STATUS
+.TP
+.B 0
+Normal exit (limit reached or signal received).
+.TP
+.B 1
+Missing arguments or fbmq not found.
+.SH SEE ALSO
+.BR fbmq (1),
+.BR fbmq-message (5),
+.BR fbmq-design (7)

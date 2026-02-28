@@ -1,0 +1,92 @@
+#!/bin/sh
+# fbmq-worker — Poll an fbmq queue and run a command for each task
+#
+# Usage: fbmq-worker [OPTIONS] <queue-dir> <command> [args...]
+#
+# Options:
+#   -p SECS    Poll interval in seconds (default: 5)
+#   -n N       Exit after N tasks (0 = unlimited, default: 0)
+#   -1         Process one task and exit (alias for -n 1)
+#   -v         Verbose logging to stderr
+#
+# The command receives the message body on stdin.
+# Environment passed to command:
+#   FBMQ_TASK_PATH  — path to the claimed file in processing/
+#   FBMQ_QUEUE      — queue directory
+#
+# Exit 0 from command → ack (done), non-zero → nack (retry/dead-letter).
+
+set -eu
+
+POLL=5
+LIMIT=0
+VERBOSE=0
+SHUTDOWN=0
+
+usage() {
+    echo "Usage: fbmq-worker [-p secs] [-n count] [-1] [-v] <queue-dir> <command> [args...]" >&2
+    exit 1
+}
+
+log() {
+    [ "$VERBOSE" -eq 1 ] && echo "fbmq-worker: $*" >&2
+}
+
+while getopts "p:n:1v" opt; do
+    case "$opt" in
+        p) POLL="$OPTARG" ;;
+        n) LIMIT="$OPTARG" ;;
+        1) LIMIT=1 ;;
+        v) VERBOSE=1 ;;
+        *) usage ;;
+    esac
+done
+shift $((OPTIND - 1))
+
+[ $# -lt 2 ] && usage
+
+QUEUE="$1"; shift
+CMD="$1"; shift
+
+FBMQ="${FBMQ:-$(command -v fbmq)}" || { echo "fbmq-worker: fbmq not found in PATH" >&2; exit 1; }
+
+trap 'SHUTDOWN=1' INT TERM
+
+PROCESSED=0
+
+while [ "$SHUTDOWN" -eq 0 ]; do
+    DEPTH=$("$FBMQ" depth "$QUEUE" 2>/dev/null) || DEPTH=0
+
+    if [ "$DEPTH" -gt 0 ]; then
+        CLAIMED=$("$FBMQ" pop "$QUEUE" 2>/dev/null) || { log "pop failed"; sleep "$POLL"; continue; }
+
+        if [ -n "$CLAIMED" ]; then
+            log "claimed: $CLAIMED"
+
+            BODY=$("$FBMQ" cat "$CLAIMED" 2>/dev/null) || BODY=""
+
+            if printf '%s' "$BODY" | FBMQ_TASK_PATH="$CLAIMED" FBMQ_QUEUE="$QUEUE" "$CMD" "$@"; then
+                "$FBMQ" ack "$QUEUE" "$CLAIMED"
+                log "acked: $CLAIMED"
+            else
+                "$FBMQ" nack "$QUEUE" "$CLAIMED"
+                log "nacked: $CLAIMED"
+            fi
+
+            PROCESSED=$((PROCESSED + 1))
+            if [ "$LIMIT" -gt 0 ] && [ "$PROCESSED" -ge "$LIMIT" ]; then
+                log "limit reached ($LIMIT tasks)"
+                break
+            fi
+
+            continue
+        fi
+    fi
+
+    log "queue empty, sleeping ${POLL}s"
+    sleep "$POLL" &
+    SLEEP_PID=$!
+    wait "$SLEEP_PID" 2>/dev/null || true
+done
+
+log "exiting after $PROCESSED tasks"
