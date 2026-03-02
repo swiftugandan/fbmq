@@ -14,7 +14,10 @@ fbmq-worker -v "$QUEUE_ROOT/work" "$SCRIPT_DIR/work-handler.sh" &
 sh "$SCRIPT_DIR/orchestrate.sh" "Refactor the authentication module to use JWT tokens"
 
 # Wait for all subtasks to complete
-while [ "$(fbmq depth "$QUEUE_ROOT/work")" -gt 0 ]; do sleep 3; done
+while [ "$(fbmq depth "$QUEUE_ROOT/work")" -gt 0 ]; do
+  inotifywait -r -qq -e moved_from,delete -t 30 \
+    "$QUEUE_ROOT/work/pending/" "$QUEUE_ROOT/work/processing/"
+done
 
 # Synthesize results
 COMBINED=""

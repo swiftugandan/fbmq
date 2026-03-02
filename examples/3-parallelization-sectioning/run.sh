@@ -27,6 +27,6 @@ fbmq-worker -v "$QUEUE_ROOT/sections" "$SCRIPT_DIR/section-handler.sh" &
 
 # Poll until all results arrive
 while [ "$(fbmq depth "$QUEUE_ROOT/section-results")" -lt 3 ]; do
-  sleep 2
+  inotifywait -r -qq -e moved_to -t 30 "$QUEUE_ROOT/section-results/pending/"
 done
 echo "All sections complete — aggregate results from $QUEUE_ROOT/section-results/done/"

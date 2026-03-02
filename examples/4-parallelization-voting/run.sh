@@ -21,7 +21,9 @@ fbmq-worker -v "$QUEUE_ROOT/votes" "$SCRIPT_DIR/voter.sh" &
 fbmq-worker -v "$QUEUE_ROOT/votes" "$SCRIPT_DIR/voter.sh" &
 
 # Wait for 3 votes
-while [ "$(fbmq depth "$QUEUE_ROOT/ballot")" -lt 3 ]; do sleep 2; done
+while [ "$(fbmq depth "$QUEUE_ROOT/ballot")" -lt 3 ]; do
+  inotifywait -r -qq -e moved_to -t 30 "$QUEUE_ROOT/ballot/pending/"
+done
 
 # Tally
 for f in "$QUEUE_ROOT/ballot/pending/"*/; do
