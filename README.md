@@ -325,7 +325,7 @@ fbmq-worker -1 /tmp/tasks /tmp/handle.sh       # one-shot
 
 See `man fbmq-worker` for all options.
 
-For advanced multi-agent architectures, see [AGENT-PATTERNS.md](AGENT-PATTERNS.md) — complete examples for all of Anthropic's agent design patterns using fbmq.
+For advanced multi-agent architectures, see [AGENT-PATTERNS.md](AGENT-PATTERNS.md) — complete examples for all of Anthropic's agent design patterns using fbmq. For common questions about task dependencies, context passing, and memory, see [FAQ.md](FAQ.md).
 
 ## Using fbmq with the Pi Coding Agent
 
