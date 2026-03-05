@@ -42,40 +42,43 @@ Correlation-Id: req-abc-123
 Expedited rollout requested.
 ```
 
-The filename **is** the ID. The first two characters **are** the bucket.
+The filename **is** the ID.
 
 ## Directory Layout
 
 ```
 /var/queue/jobs/
-    pending/00..ff/    256 hash-sharded buckets
+    pending/           Flat directory (or with priority subdirs)
     processing/        Claimed (timestamp-prefixed filenames)
     done/              Completed
     failed/            Dead-letter
     .tmp/              Atomic write staging
+    .meta/             Queue configuration (max_pending)
 ```
 
 ## Commands
 
 | Command | Description |
 |---------|-------------|
-| `fbmq init <dir> [--priority]` | Create a queue |
+| `fbmq init <dir> [--priority] [--max-pending N]` | Create a queue |
 | `fbmq push <dir> [opts] [file]` | Enqueue (prints ID) |
 | `fbmq pop <dir>` | Claim next message (prints path) |
 | `fbmq ack <dir> <path>` | Mark done |
 | `fbmq nack <dir> <path>` | Return for retry / dead-letter |
-| `fbmq depth <dir>` | Queue depth (full scan of all 256 buckets + processing) |
+| `fbmq depth <dir>` | Queue depth (pending + processing) |
 | `fbmq inspect <file>` | Show metadata |
 | `fbmq cat <file>` | Print body only (strip frontmatter) |
-| `fbmq reap <dir> [-l secs]` | Reclaim stale + expire TTL |
+| `fbmq reap <dir> [-l secs] [--no-ttl]` | Reclaim stale + expire TTL |
 | `fbmq purge <dir> [-a secs]` | Delete old done messages |
+| `fbmq sync <dir>` | Flush deferred dir fsyncs |
+| `fbmq version` | Print version |
 
 ## Operations with Unix tools
 
 ```bash
 grep -rl "Priority: critical" pending/     # find critical
-cat pending/a3/a3f2...md                   # inspect
-mv failed/a3f2...md pending/a3/a3f2...md   # manual retry
+cat pending/a3f2...md                      # inspect
+mv failed/a3f2...md pending/a3f2...md      # manual retry
 inotifywait -mr pending/                   # monitor
 find done/ -mtime +7 -delete               # purge
 ```
@@ -126,8 +129,7 @@ ID to stdout:
 a3f2e1b4c5d6a7b8c9d0e1f2a3b4c5d6
 ```
 
-The message is now a Markdown file sitting in one of the 256 `pending/`
-buckets.
+The message is now a Markdown file sitting in the `pending/` directory.
 
 **Step 3 — Pop the next task.** Tell Claude Code:
 
@@ -144,7 +146,7 @@ echo "$TASK"
 full filesystem path:
 
 ```
-/tmp/demo/processing/1719500000-a3f2e1b4c5d6a7b8c9d0e1f2a3b4c5d6.md
+/tmp/demo/processing/1719500000000000000.a3f2e1b4c5d6a7b8c9d0e1f2a3b4c5d6.md
 ```
 
 The message has moved from `pending/` to `processing/`. No other consumer
@@ -191,7 +193,9 @@ Claude Code runs:
 fbmq nack /tmp/demo "$TASK"
 ```
 
-The message moves from `processing/` to `failed/` (the dead-letter queue).
+The message moves from `processing/` back to `pending/` for retry (incrementing
+its retry count). After max retries (default: 3), it moves to `failed/` (the
+dead-letter queue).
 
 **Step 6 — Check queue depth.** Tell Claude Code:
 
@@ -203,8 +207,7 @@ Claude Code runs:
 fbmq depth /tmp/demo
 ```
 
-`depth` counts all pending messages across the 256 buckets and prints a
-single number:
+`depth` counts all pending and processing messages and prints a single number:
 
 ```
 3
@@ -221,18 +224,17 @@ ls /tmp/demo/failed/
 ```
 
 ```
-1719500000-a3f2e1b4c5d6a7b8c9d0e1f2a3b4c5d6.md
+a3f2e1b4c5d6a7b8c9d0e1f2a3b4c5d6.md
 ```
 
 Then to see the metadata of a specific failure:
 
 ```bash
-fbmq inspect /tmp/demo/failed/1719500000-a3f2e1b4c5d6a7b8c9d0e1f2a3b4c5d6.md
+fbmq inspect /tmp/demo/failed/a3f2e1b4c5d6a7b8c9d0e1f2a3b4c5d6.md
 ```
 
 ```
 ID:             a3f2e1b4c5d6a7b8c9d0e1f2a3b4c5d6
-Bucket:         a3
 Created:        2026-02-26T14:30:01.123456789Z
 Created by:     28431@worker-12
 Priority:       high

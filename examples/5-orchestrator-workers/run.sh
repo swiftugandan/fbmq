@@ -21,10 +21,8 @@ done
 
 # Synthesize results
 COMBINED=""
-for f in "$QUEUE_ROOT/results/pending/"*/; do
-  for msg in "$f"*.md; do
-    [ -f "$msg" ] && COMBINED="$COMBINED\n---\n$(fbmq cat "$msg")"
-  done
+for msg in "$QUEUE_ROOT/results/pending/"*.md; do
+  [ -f "$msg" ] && COMBINED="$COMBINED\n---\n$(fbmq cat "$msg")"
 done
 
 printf '%b' "$COMBINED" | claude -p "Synthesize these subtask results into a \

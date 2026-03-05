@@ -1,0 +1,286 @@
+#!/bin/sh
+# fbmq-dashboard — Live TUI dashboard for fbmq queue monitoring
+#
+# Usage: fbmq-dashboard [OPTIONS] <queue-dir>
+#
+# Options:
+#   -i SECS    Refresh interval (default: 5)
+#   -l SECS    Lease timeout for stale warning (default: 300)
+#   -n COUNT   Max processing messages to show (default: 10)
+#   -1         Print once and exit (scriptable/CI mode)
+#   -h         Help
+
+set -eu
+
+INTERVAL=5
+LEASE=300
+MAX_PROC=10
+ONCE=0
+SHUTDOWN=0
+
+usage() {
+    cat >&2 <<'EOF'
+Usage: fbmq-dashboard [OPTIONS] <queue-dir>
+
+Options:
+  -i SECS    Refresh interval (default: 5)
+  -l SECS    Lease timeout for stale warning (default: 300)
+  -n COUNT   Max processing messages to show (default: 10)
+  -1         Print once and exit (scriptable/CI mode)
+  -h         Help
+EOF
+    exit 1
+}
+
+while getopts "i:l:n:1h" opt; do
+    case "$opt" in
+        i) INTERVAL="$OPTARG" ;;
+        l) LEASE="$OPTARG" ;;
+        n) MAX_PROC="$OPTARG" ;;
+        1) ONCE=1 ;;
+        h) usage ;;
+        *) usage ;;
+    esac
+done
+shift $((OPTIND - 1))
+
+[ $# -lt 1 ] && usage
+
+QUEUE="$1"
+
+# ── Validate queue ──
+
+if [ ! -d "$QUEUE/pending" ] || [ ! -d "$QUEUE/processing" ]; then
+    echo "fbmq-dashboard: $QUEUE does not look like an fbmq queue (missing pending/ or processing/)" >&2
+    exit 1
+fi
+
+# ── Color setup ──
+
+if command -v tput >/dev/null 2>&1 && [ "${TERM:-dumb}" != "dumb" ]; then
+    NCOLORS=$(tput colors 2>/dev/null || echo 0)
+else
+    NCOLORS=0
+fi
+
+if [ "$NCOLORS" -ge 8 ]; then
+    C_RESET=$(tput sgr0)
+    C_BOLD=$(tput bold)
+    C_CYAN=$(tput setaf 6)
+    C_YELLOW=$(tput setaf 3)
+    C_GREEN=$(tput setaf 2)
+    C_RED=$(tput setaf 1)
+    C_BOLD_RED="${C_BOLD}$(tput setaf 1)"
+    C_DIM=$(tput dim 2>/dev/null || echo "")
+else
+    C_RESET="" C_BOLD="" C_CYAN="" C_YELLOW="" C_GREEN="" C_RED="" C_BOLD_RED="" C_DIM=""
+fi
+
+# ── Terminal management ──
+
+cleanup() {
+    if [ "$ONCE" -eq 0 ]; then
+        tput rmcup 2>/dev/null || true
+        tput cnorm 2>/dev/null || true
+    fi
+}
+
+if [ "$ONCE" -eq 0 ]; then
+    if ! command -v tput >/dev/null 2>&1 || [ "${TERM:-dumb}" = "dumb" ]; then
+        echo "fbmq-dashboard: no tput or dumb terminal; use -1 for non-interactive mode" >&2
+        exit 1
+    fi
+    COLS=$(tput cols 2>/dev/null || echo 80)
+    LINES=$(tput lines 2>/dev/null || echo 24)
+    if [ "$COLS" -lt 60 ] || [ "$LINES" -lt 16 ]; then
+        echo "fbmq-dashboard: terminal too small (need at least 60x16, have ${COLS}x${LINES})" >&2
+        exit 1
+    fi
+    tput smcup
+    tput civis
+    trap cleanup EXIT
+    trap 'SHUTDOWN=1' INT TERM
+fi
+
+# ── Counting helpers ──
+
+count_files() {
+    find "$1" -name '*.md' 2>/dev/null | wc -l | tr -d ' '
+}
+
+count_files_shallow() {
+    find "$1" -maxdepth 1 -name '*.md' 2>/dev/null | wc -l | tr -d ' '
+}
+
+# ── Priority detection ──
+
+has_priority() {
+    [ -d "$QUEUE/pending/2-normal" ]
+}
+
+# ── Bar rendering ──
+
+render_bar() {
+    _count=$1
+    _total=$2
+    _bar_width=24
+
+    if [ "$_total" -eq 0 ]; then
+        _filled=0
+    else
+        _filled=$(( (_count * _bar_width + _total / 2) / _total ))
+    fi
+    [ "$_filled" -gt "$_bar_width" ] && _filled=$_bar_width
+    _empty=$((_bar_width - _filled))
+
+    _bar="$(printf '%*s' "$_filled" '' | tr ' ' '#')$(printf '%*s' "$_empty" '' | tr ' ' '-')"
+
+    if [ "$_total" -gt 0 ]; then
+        _pct=$(( (_count * 100 + _total / 2) / _total ))
+    else
+        _pct=0
+    fi
+
+    printf '%s  %3d%%' "$_bar" "$_pct"
+}
+
+# ── Format elapsed time ──
+
+format_age() {
+    _secs=$1
+    _m=$((_secs / 60))
+    _s=$((_secs % 60))
+    printf '%3dm %02ds' "$_m" "$_s"
+}
+
+# ── Horizontal rule ──
+
+hrule() {
+    printf '%*s\n' "${1:-78}" '' | tr ' ' '-'
+}
+
+# ── Main render ──
+
+render() {
+    NOW=$(date +%s)
+    TIMESTAMP=$(date +%H:%M:%S)
+
+    # Counts
+    if has_priority; then
+        PENDING=$(count_files "$QUEUE/pending")
+    else
+        PENDING=$(count_files_shallow "$QUEUE/pending")
+    fi
+    PROCESSING=$(count_files_shallow "$QUEUE/processing")
+    DONE=$(count_files_shallow "$QUEUE/done")
+    FAILED=$(count_files_shallow "$QUEUE/failed")
+
+    WIDTH=78
+
+    if [ "$ONCE" -eq 0 ]; then
+        tput cup 0 0
+    fi
+
+    # Header
+    hrule "$WIDTH"
+    printf "  fbmq dashboard  %-*s  refreshed %s\n" $((WIDTH - 34)) "$QUEUE" "$TIMESTAMP"
+    hrule "$WIDTH"
+
+    # Summary counts
+    printf "  ${C_CYAN}PENDING${C_RESET}        ${C_YELLOW}PROCESSING${C_RESET}       ${C_GREEN}DONE${C_RESET}         ${C_RED}FAILED${C_RESET}\n"
+    printf "  ${C_CYAN}[ %5d ]${C_RESET}     ${C_YELLOW}[ %5d ]${C_RESET}       ${C_GREEN}[ %5d ]${C_RESET}     ${C_RED}[ %3d ]${C_RESET}\n" \
+        "$PENDING" "$PROCESSING" "$DONE" "$FAILED"
+    hrule "$WIDTH"
+
+    # Priority breakdown
+    if has_priority; then
+        # Single find pass for all priority counts
+        P_CRIT=0 P_HIGH=0 P_NORM=0 P_LOW=0
+        eval "$(find "$QUEUE/pending" -name '*.md' 2>/dev/null | awk -F/ '
+            /\/0-critical\// { c++ }
+            /\/1-high\//     { h++ }
+            /\/2-normal\//   { n++ }
+            /\/3-low\//      { l++ }
+            END { printf "P_CRIT=%d P_HIGH=%d P_NORM=%d P_LOW=%d", c+0, h+0, n+0, l+0 }
+        ')"
+
+        printf "  PRIORITY BREAKDOWN\n"
+        printf "  ${C_BOLD_RED}* CRITICAL${C_RESET}  [ %4d ]  %s\n" "$P_CRIT" "$(render_bar "$P_CRIT" "$PENDING")"
+        printf "  ${C_YELLOW}* HIGH${C_RESET}      [ %4d ]  %s\n" "$P_HIGH" "$(render_bar "$P_HIGH" "$PENDING")"
+        printf "  ${C_CYAN}* NORMAL${C_RESET}    [ %4d ]  %s\n" "$P_NORM" "$(render_bar "$P_NORM" "$PENDING")"
+        printf "  ${C_DIM}* LOW${C_RESET}       [ %4d ]  %s\n" "$P_LOW" "$(render_bar "$P_LOW" "$PENDING")"
+        hrule "$WIDTH"
+    fi
+
+    # Processing detail
+    printf "  PROCESSING  (%d in-flight)\n" "$PROCESSING"
+
+    if [ "$PROCESSING" -gt 0 ]; then
+        printf "  %-10s  %-32s\n" "AGE" "MESSAGE ID"
+
+        SHOWN=0
+        for f in "$QUEUE/processing/"*.md; do
+            [ -e "$f" ] || continue
+            [ "$SHOWN" -ge "$MAX_PROC" ] && break
+
+            BASENAME="${f##*/}"
+            BASENAME="${BASENAME%.md}"
+            # Filename format: <10-digit-epoch><9-digit-nsec>-<id>.md
+            EPOCH_STR="${BASENAME%"${BASENAME#??????????}"}"
+            # Extract the message ID (after the 19-char timestamp+nsec prefix and dash)
+            MSG_ID="${BASENAME#????????????????????}"
+
+            # Compute age
+            AGE=$((NOW - EPOCH_STR))
+            [ "$AGE" -lt 0 ] && AGE=0
+
+            # Truncate ID for display
+            if [ ${#MSG_ID} -gt 24 ]; then
+                _prefix="${MSG_ID%"${MSG_ID#????????????}"}"
+                _suffix="${MSG_ID#"${MSG_ID%????}"}"
+                DISPLAY_ID="${_prefix}...${_suffix}"
+            else
+                DISPLAY_ID="$MSG_ID"
+            fi
+
+            if [ "$AGE" -ge "$LEASE" ]; then
+                printf "  ${C_BOLD_RED}%s${C_RESET}    %-24s  ${C_BOLD_RED}!! STALE${C_RESET}\n" "$(format_age "$AGE")" "$DISPLAY_ID"
+            else
+                printf "  %s    %-24s\n" "$(format_age "$AGE")" "$DISPLAY_ID"
+            fi
+
+            SHOWN=$((SHOWN + 1))
+        done
+
+        if [ "$PROCESSING" -gt "$MAX_PROC" ]; then
+            printf "  %*s(showing %d of %d)\n" $((WIDTH - 30)) "" "$MAX_PROC" "$PROCESSING"
+        fi
+    fi
+
+    hrule "$WIDTH"
+
+    # Footer
+    if [ "$ONCE" -eq 0 ]; then
+        printf "  [Ctrl-C] quit   interval: %ds   lease: %ds\n" "$INTERVAL" "$LEASE"
+    fi
+    hrule "$WIDTH"
+
+    # Clear any stale lines below
+    if [ "$ONCE" -eq 0 ]; then
+        tput ed 2>/dev/null || true
+    fi
+}
+
+# ── Main loop ──
+
+if [ "$ONCE" -eq 1 ]; then
+    render
+    exit 0
+fi
+
+while [ "$SHUTDOWN" -eq 0 ]; do
+    render
+    sleep "$INTERVAL" &
+    SLEEP_PID=$!
+    wait "$SLEEP_PID" 2>/dev/null || true
+done

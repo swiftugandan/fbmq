@@ -25,7 +25,7 @@ Process order **12345**.
 .SH FIELDS
 .TP
 .B id
-(required) md5 hash. First two hex chars = bucket shard.
+(required) 128 bits of random entropy formatted as 32 hex characters.
 .TP
 .B created_at
 (required) ISO 8601 with nanoseconds.
@@ -53,13 +53,11 @@ Arbitrary continuation lines. Passed through by the queue.
 .SH FILENAME
 .nf
 a3f2e1b4c5d6a7b8c9d0e1f2a3b4c5d6.md
-^^
-bucket shard
 
 In processing/:
-1740000001.a3f2e1b4c5d6a7b8c9d0e1f2a3b4c5d6.md
-^^^^^^^^^^
-claim timestamp
+1740000001000000000.a3f2e1b4c5d6a7b8c9d0e1f2a3b4c5d6.md
+^^^^^^^^^^^^^^^^^^^
+claim timestamp (seconds + 9-digit nanoseconds)
 .fi
 .SH HEADER FORMAT
 fbmq uses RFC 822-style headers: field names are case-insensitive, separated

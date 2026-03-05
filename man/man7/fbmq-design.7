@@ -10,24 +10,62 @@ is the sole coordination primitive.
 .SH DIRECTORY LAYOUT
 .nf
 <queue>/
-    pending/00..ff/     256 hash-sharded buckets
+    pending/            Flat directory (or with priority subdirs)
     processing/         Claimed (timestamp-prefixed)
     done/               Completed
     failed/             Dead-letter
     .tmp/               Atomic write staging
+    .meta/              Queue configuration (max_pending)
 .fi
 .SH IDENTITY
-Message ID = md5(timestamp + PID + random bytes). First two hex chars = bucket.
-Entropy from getrandom(2) with /dev/urandom fallback.
+Message ID = 128 bits of random entropy formatted as 32-char hex.
+Entropy from arc4random_buf(3) on macOS, getrandom(2) on Linux,
+with /dev/urandom fallback.
 .SH CONCURRENCY
 Lock-free critical path.
 .BR rename (2)
 is atomic \(em one consumer wins, others get ENOENT.
-Depth is computed statelessly by scanning all 256 pending buckets plus
-processing/ on each call. No persistent state files are needed.
+Depth is computed by scanning pending/ (or 4 priority subdirs) plus
+processing/ on each call.
+.SH MAX PENDING
+A configurable limit on the number of pending messages (default: 10000).
+Set at init time with \fB--max-pending N\fR and stored in
+\fI.meta/max_pending\fR. Enqueue returns ENOSPC when the limit is reached.
+Use \fB--max-pending 0\fR for unlimited.
+.PP
+The limit is a \fIsoft limit\fR: under high concurrency, two producers may
+both pass the check before either completes its rename, briefly exceeding
+the cap. Fixing this TOCTOU window would require file locking, which
+contradicts the lock-free rename(2)-only design. The overshoot is bounded
+by the number of concurrent producers and is acceptable in practice.
+.SH DEQUEUE CONTENTION
+Pop grabs the first available .md entry returned by
+.BR readdir (3)
+and attempts to claim it via
+.BR rename (2).
+If another consumer claimed it first, the rename fails with ENOENT and
+the caller retries (up to \fBFBMQ_SCAN_RETRIES\fR times).
+.PP
+No ordering guarantee is made: readdir order is filesystem-dependent and
+varies across ext4, XFS, APFS, and tmpfs. Under multi-consumer contention,
+ordering is inherently non-deterministic. If your workload requires
+ordered processing, enforce it at the application layer (e.g. sequence
+numbers in headers or correlation IDs). For workloads with many consumers,
+enable priority directories to spread load across four subdirectories.
 .SH RELIABILITY
 At-least-once delivery. Lease-based reaping. Dead-letter after max retries.
 TTL expiry for time-bounded messages.
+.SH NACK CRASH WINDOW
+The \fBnack\fR operation is not atomic. It creates a new file in the
+destination directory (pending/ or failed/) via rename from .tmp/, then
+unlinks the original claimed file from processing/. If the process crashes
+between these two steps, the message exists in both locations simultaneously.
+.PP
+Running \fBfbmq reap\fR periodically (e.g. via cron) is required for crash
+safety. The reaper detects messages in processing/ whose corresponding
+file already exists in pending/ or failed/, and removes the stale
+processing/ copy. Until the reaper runs, such messages may be delivered
+twice (at\-least\-once semantics).
 .SH PERFORMANCE
 .TS
 l l l.

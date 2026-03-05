@@ -55,32 +55,33 @@ trap 'SHUTDOWN=1' INT TERM
 PROCESSED=0
 
 while [ "$SHUTDOWN" -eq 0 ]; do
-    DEPTH=$("$FBMQ" depth "$QUEUE" 2>/dev/null) || DEPTH=0
+    CLAIMED=$("$FBMQ" pop "$QUEUE" 2>/dev/null)
+    POP_RC=$?
 
-    if [ "$DEPTH" -gt 0 ]; then
-        CLAIMED=$("$FBMQ" pop "$QUEUE" 2>/dev/null) || { log "pop failed"; sleep "$POLL"; continue; }
+    if [ "$POP_RC" -eq 0 ] && [ -n "$CLAIMED" ]; then
+        log "claimed: $CLAIMED"
 
-        if [ -n "$CLAIMED" ]; then
-            log "claimed: $CLAIMED"
+        BODY=$("$FBMQ" cat "$CLAIMED" 2>/dev/null) || BODY=""
 
-            BODY=$("$FBMQ" cat "$CLAIMED" 2>/dev/null) || BODY=""
-
-            if printf '%s' "$BODY" | FBMQ_TASK_PATH="$CLAIMED" FBMQ_QUEUE="$QUEUE" "$CMD" "$@"; then
-                "$FBMQ" ack "$QUEUE" "$CLAIMED"
-                log "acked: $CLAIMED"
-            else
-                "$FBMQ" nack "$QUEUE" "$CLAIMED"
-                log "nacked: $CLAIMED"
-            fi
-
-            PROCESSED=$((PROCESSED + 1))
-            if [ "$LIMIT" -gt 0 ] && [ "$PROCESSED" -ge "$LIMIT" ]; then
-                log "limit reached ($LIMIT tasks)"
-                break
-            fi
-
-            continue
+        if printf '%s' "$BODY" | FBMQ_TASK_PATH="$CLAIMED" FBMQ_QUEUE="$QUEUE" "$CMD" "$@"; then
+            "$FBMQ" ack "$QUEUE" "$CLAIMED"
+            log "acked: $CLAIMED"
+        else
+            "$FBMQ" nack "$QUEUE" "$CLAIMED"
+            log "nacked: $CLAIMED"
         fi
+
+        PROCESSED=$((PROCESSED + 1))
+        if [ "$LIMIT" -gt 0 ] && [ "$PROCESSED" -ge "$LIMIT" ]; then
+            log "limit reached ($LIMIT tasks)"
+            break
+        fi
+
+        continue
+    fi
+
+    if [ "$POP_RC" -ge 2 ]; then
+        log "pop error (exit $POP_RC)"
     fi
 
     log "queue empty, sleeping ${POLL}s"

@@ -26,7 +26,6 @@ Compiler flags: `-O2 -Wall -Wextra -Wpedantic -std=c11 -D_GNU_SOURCE`
 - `include/fbmq.h` — Public API: structs (`fbmq_message_t`, `fbmq_queue_t`, `fbmq_header_t`), core functions, constants
 - `src/fbmq.c` — Core library: queue init, enqueue/dequeue, depth tracking, serialization, RFC 822 parser, reapers
 - `src/fbmq_main.c` — CLI: commands (init, push, pop, ack, nack, depth, inspect, cat, reap, purge), signal handling
-- `src/md5.c` / `src/md5.h` — Public domain MD5 (used for ID generation, not crypto)
 - `scripts/fbmq-reaper` — Cron-ready shell wrapper for reap + purge
 - `man/` — Man pages: fbmq.1 (commands), fbmq-message.5 (format), fbmq-design.7 (architecture)
 
@@ -34,21 +33,23 @@ Compiler flags: `-O2 -Wall -Wextra -Wpedantic -std=c11 -D_GNU_SOURCE`
 
 ```
 <queue-root>/
-├── pending/00..ff/       256 hash-sharded buckets (optionally with priority subdirs)
+├── pending/              Flat directory (or with priority subdirs if --priority)
 ├── processing/           Claimed messages (timestamp-prefixed filenames)
 ├── done/                 Completed messages
 ├── failed/               Dead-letter queue
-└── .tmp/                 Atomic write staging
+├── .tmp/                 Atomic write staging
+└── .meta/                Queue configuration (max_pending)
 ```
 
 ### Key design patterns
 
-- **Lock-free concurrency**: `rename(2)` is the only coordination primitive. One consumer wins the rename; others get ENOENT and retry another bucket.
+- **Lock-free concurrency**: `rename(2)` is the only coordination primitive. One consumer wins the rename; others get ENOENT and retry.
 - **Message lifecycle**: `.tmp/` → `pending/` (enqueue) → `processing/` (pop) → `done/` (ack) or back to `pending/`/`failed/` (nack)
-- **Count-on-read depth**: `fbmq_depth()` scans all 256 pending buckets plus `processing/` on each call. Stateless — no persistent counter files.
+- **Count-on-read depth**: `fbmq_depth()` scans `pending/` (or 4 priority subdirs) plus `processing/` on each call.
+- **Max pending**: Configurable limit on pending messages (default 10000, 0 = unlimited). Checked at enqueue time; returns `ENOSPC` when full.
 - **Buffered single-write serialization**: `fbmq_serialize()` builds the entire message in memory and writes with a single `write(2)` syscall.
-- **Priority scanning**: When enabled, pending buckets contain subdirs `0-critical/`, `1-high/`, `2-normal/`, `3-low/`. All buckets at critical are scanned before any bucket at high.
-- **ID generation**: MD5(timestamp + pid + random bytes) → 32-char hex. Entropy from `getrandom(2)` with `/dev/urandom` fallback.
+- **Priority scanning**: When enabled, `pending/` contains subdirs `0-critical/`, `1-high/`, `2-normal/`, `3-low/`. Critical is scanned before high, etc.
+- **ID generation**: 128 bits of random entropy → 32-char hex. Entropy from `arc4random_buf(3)` on macOS, `getrandom(2)` on Linux, with `/dev/urandom` fallback.
 
 ### Platform considerations
 

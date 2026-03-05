@@ -15,10 +15,12 @@ is the sole coordination primitive.
 Messages are human-readable, renderable, greppable, and diffable.
 .SH COMMANDS
 .TP
-.BI "init " "dir " "[--priority]"
-Initialize a new queue with 256 hash-sharded buckets. With
+.BI "init " "dir " "[--priority] [--max-pending " "N" "]"
+Initialize a new queue. With
 .B --priority
 creates priority subdirectories (0-critical, 1-high, 2-normal, 3-low).
+.B --max-pending
+sets the maximum number of pending messages (default: 10000, 0 = unlimited).
 .TP
 .BI "push " "dir " "[options] [file|-]"
 Enqueue a message. Reads Markdown body from
@@ -60,7 +62,7 @@ command, sync is called automatically after enqueue.
 .TP
 .TP
 .BI "sync " "dir"
-Flush deferred directory fsyncs for all pending buckets, processing/, and failed/.
+Flush deferred directory fsyncs for pending/, processing/, and failed/.
 Use after a batch of
 .B push \-\-batch\-fsync
 calls to ensure directory entries are durable. The kernel coalesces these into a
@@ -69,7 +71,9 @@ single journal transaction, so one
 covers all preceding enqueues.
 .TP
 .BI "pop " "dir"
-Claim the next available message. Prints the claimed file path to stdout.
+Claim an available message. Prints the claimed file path to stdout.
+No ordering guarantee is made; see
+.BR fbmq-design (7).
 The message is on disk \(em read it with
 .BR cat (1)
 or
@@ -80,14 +84,16 @@ Exit 0 on success, 1 if empty.
 Mark a claimed message as done.
 .TP
 .BI "nack " "dir path"
-Return a message for retry. Increments retry_count. Dead-letters after max retries.
+Return a message for retry. Increments retry_count. Dead-letters after max retries
+(default: 3).
 .TP
 .BI "depth " "dir"
-Print queue depth. Scans all 256 pending buckets and processing/ on each call.
-Stateless \(em no persistent counter files.
+Print queue depth. Scans pending/ and processing/ on each call.
 .TP
-.BI "reap " "dir " "[-l secs]"
+.BI "reap " "dir " "[-l secs] [--no-ttl]"
 Reclaim stale processing messages and expire TTL-exceeded pending messages.
+.B --no-ttl
+skips the TTL expiry scan.
 .TP
 .BI "purge " "dir " "[-a secs]"
 Delete done messages older than
@@ -117,7 +123,7 @@ $ fbmq ack /var/queue/jobs "$CLAIMED"
 $ fbmq nack /var/queue/jobs "$CLAIMED"
 .fi
 .SH EXIT STATUS
-0 = success, 1 = empty queue (pop) or error.
+0 = success, 1 = empty queue (pop) or error, 2 = queue full (push).
 .SH SEE ALSO
 .BR fbmq-message (5),
 .BR fbmq-design (7),

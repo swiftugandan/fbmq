@@ -1,9 +1,6 @@
 /*
  * fbmq_main.c — CLI entry point
  *
- * FIX #1:  pop prints ONLY the claimed path to stdout.
- *          The message is on disk — use cat/fbmq inspect to read it.
- * FIX #6:  --no-fsync flag on push for tmpfs mode.
  */
 
 #include "fbmq.h"
@@ -25,13 +22,13 @@ static void usage(void)
         "Usage: fbmq <command> [options]\n"
         "\n"
         "Commands:\n"
-        "  init    <dir> [--priority]             Initialize a queue\n"
+        "  init    <dir> [--priority] [--max-pending N]  Initialize a queue\n"
         "  push    <dir> [opts] [file|-]           Enqueue a message\n"
         "  pop     <dir>                           Claim next message (prints path)\n"
         "  ack     <dir> <path>                    Complete a message\n"
         "  nack    <dir> <path>                    Return for retry / dead-letter\n"
         "  depth   <dir>                           Print queue depth\n"
-        "  reap    <dir> [-l secs]                 Reclaim stale processing msgs\n"
+        "  reap    <dir> [-l secs] [--no-ttl]       Reclaim stale processing msgs\n"
         "  purge   <dir> [-a secs]                 Delete old done messages\n"
         "  sync    <dir>                           Flush deferred dir fsyncs\n"
         "  inspect <file>                          Show message metadata\n"
@@ -81,6 +78,7 @@ static char *read_all(int fd, size_t *len)
             return NULL;
         }
         if (n >= cap - 1) {
+            if (cap > SIZE_MAX / 2) { errno = ENOMEM; free(buf); return NULL; }
             cap *= 2;
             char *tmp = realloc(buf, cap);
             if (!tmp) { free(buf); return NULL; }
@@ -101,13 +99,40 @@ static char *read_file(const char *path, size_t *len)
     return buf;
 }
 
+static void load_max_pending(fbmq_queue_t *q);
+
 static fbmq_queue_t make_queue(const char *dir)
 {
     fbmq_queue_t q;
     fbmq_queue_defaults(&q);
-    snprintf(q.root, sizeof(q.root), "%s", dir);
+    int n = snprintf(q.root, sizeof(q.root), "%s", dir);
+    if (n < 0 || (size_t)n >= sizeof(q.root)) {
+        fprintf(stderr, "fbmq: queue path too long\n");
+        exit(1);
+    }
     q.use_priority_dirs = fbmq_detect_priority(dir);
+    load_max_pending(&q);
+
     return q;
+}
+
+/* Read persisted max_pending from .meta/ into queue handle */
+static void load_max_pending(fbmq_queue_t *q)
+{
+    char meta_path[FBMQ_MAX_PATH];
+    int mp = snprintf(meta_path, sizeof(meta_path), "%s/.meta/max_pending", q->root);
+    if (mp < 0 || (size_t)mp >= sizeof(meta_path)) return;
+    size_t meta_len = 0;
+    char *meta_buf = read_file(meta_path, &meta_len);
+    if (meta_buf) {
+        char *end;
+        long long v = strtoll(meta_buf, &end, 10);
+        if (end != meta_buf && v >= 0)
+            q->max_pending = (int64_t)v;
+        else
+            fprintf(stderr, "fbmq: warning: ignoring corrupt .meta/max_pending\n");
+        free(meta_buf);
+    }
 }
 
 /* ── Commands ── */
@@ -117,20 +142,38 @@ static int cmd_init(int argc, char **argv)
     if (argc < 1) { fprintf(stderr, "fbmq init: missing queue-dir\n"); return 1; }
 
     int use_prio = 0;
-    for (int i = 1; i < argc; i++)
-        if (strcmp(argv[i], "--priority") == 0) use_prio = 1;
+    int64_t max_pending = FBMQ_DEFAULT_MAX_PENDING;
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--priority") == 0)
+            use_prio = 1;
+        else if (strcmp(argv[i], "--max-pending") == 0 && i+1 < argc) {
+            char *end;
+            errno = 0;
+            long long v = strtoll(argv[++i], &end, 10);
+            if (*end != '\0' || v < 0 || errno == ERANGE) {
+                fprintf(stderr, "fbmq init: invalid max-pending: %s\n", argv[i]);
+                return 1;
+            }
+            max_pending = (int64_t)v;
+        }
+    }
 
     fbmq_queue_t q;
     fbmq_queue_defaults(&q);
     q.use_priority_dirs = use_prio;
+    q.max_pending = max_pending;
 
     if (fbmq_init(&q, argv[0]) != 0) {
         fprintf(stderr, "fbmq init: %s: %s\n", argv[0], strerror(errno));
         return 1;
     }
 
-    fprintf(stderr, "Initialized queue at %s (%d buckets%s)\n",
-            argv[0], FBMQ_BUCKET_COUNT, use_prio ? ", priority dirs" : "");
+    if (max_pending > 0)
+        fprintf(stderr, "Initialized queue at %s (max-pending: %lld%s)\n",
+                argv[0], (long long)max_pending, use_prio ? ", priority dirs" : "");
+    else
+        fprintf(stderr, "Initialized queue at %s (max-pending: unlimited%s)\n",
+                argv[0], use_prio ? ", priority dirs" : "");
     return 0;
 }
 
@@ -144,13 +187,30 @@ static int cmd_push(int argc, char **argv)
     const char *corr_id = NULL, *created_by = NULL, *infile = NULL;
     char tags[1024] = {0};
 
+    int end_of_opts = 0;
     for (int i = 1; i < argc; i++) {
+        if (!end_of_opts && strcmp(argv[i], "--") == 0) {
+            end_of_opts = 1;
+            continue;
+        }
+        if (end_of_opts) {
+            infile = argv[i];
+            continue;
+        }
         if ((strcmp(argv[i], "-p") == 0 || strcmp(argv[i], "--priority") == 0) && i+1 < argc)
-            prio = fbmq_priority_parse(argv[++i]);
+        {
+            int parsed = fbmq_priority_parse(argv[++i]);
+            if (parsed < 0) {
+                fprintf(stderr, "fbmq push: invalid priority '%s' (expected: critical, high, normal, low)\n", argv[i]);
+                return 1;
+            }
+            prio = (fbmq_priority_t)parsed;
+        }
         else if ((strcmp(argv[i], "-t") == 0 || strcmp(argv[i], "--ttl") == 0) && i+1 < argc) {
             char *end;
+            errno = 0;
             long v = strtol(argv[++i], &end, 10);
-            if (*end != '\0' || v < 0 || v > INT_MAX) {
+            if (*end != '\0' || v < 0 || v > INT_MAX || errno == ERANGE) {
                 fprintf(stderr, "fbmq push: invalid TTL: %s\n", argv[i]);
                 return 1;
             }
@@ -162,15 +222,29 @@ static int cmd_push(int argc, char **argv)
             created_by = argv[++i];
         else if ((strcmp(argv[i], "-T") == 0 || strcmp(argv[i], "--tag") == 0) && i+1 < argc) {
             size_t pos = strlen(tags);
+            int needed = 0;
             if (pos > 0)
-                pos += (size_t)snprintf(tags + pos, sizeof(tags) - pos, ", ");
-            snprintf(tags + pos, sizeof(tags) - pos, "%s", argv[++i]);
+                needed = snprintf(tags + pos, sizeof(tags) - pos, ", ");
+            if (needed < 0 || pos + (size_t)needed >= sizeof(tags)) {
+                fprintf(stderr, "fbmq push: tags exceed %zu byte limit\n", sizeof(tags) - 1);
+                return 1;
+            }
+            pos += (size_t)needed;
+            int wrote = snprintf(tags + pos, sizeof(tags) - pos, "%s", argv[++i]);
+            if (wrote < 0 || pos + (size_t)wrote >= sizeof(tags)) {
+                fprintf(stderr, "fbmq push: tags exceed %zu byte limit\n", sizeof(tags) - 1);
+                return 1;
+            }
         }
         else if (strcmp(argv[i], "--no-fsync") == 0)
             no_fsync = 1;
         else if (strcmp(argv[i], "--batch-fsync") == 0)
             batch_fsync = 1;
-        else if (argv[i][0] != '-')
+        else if (argv[i][0] == '-') {
+            fprintf(stderr, "fbmq push: unrecognized option '%s'\n", argv[i]);
+            return 1;
+        }
+        else
             infile = argv[i];
     }
 
@@ -212,6 +286,11 @@ static int cmd_push(int argc, char **argv)
     if (created_by) snprintf(msg.header.created_by, sizeof(msg.header.created_by), "%s", created_by);
 
     if (fbmq_enqueue(&q, &msg) != 0) {
+        if (errno == ENOSPC) {
+            fprintf(stderr, "fbmq push: queue full (max-pending reached)\n");
+            free(body);
+            return 2;
+        }
         fprintf(stderr, "fbmq push: enqueue failed: %s\n", strerror(errno));
         free(body);
         return 1;
@@ -254,7 +333,7 @@ static int cmd_pop(int argc, char **argv)
     if (rc == 1) return 1;  /* empty, silent */
     if (rc < 0) {
         fprintf(stderr, "fbmq pop: %s\n", strerror(errno));
-        return 1;
+        return 2;
     }
 
     /*
@@ -312,8 +391,9 @@ static int cmd_reap(int argc, char **argv)
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-l") == 0 && i+1 < argc) {
             char *end;
+            errno = 0;
             long v = strtol(argv[++i], &end, 10);
-            if (*end != '\0' || v < 0 || v > INT_MAX) {
+            if (*end != '\0' || v < 0 || v > INT_MAX || errno == ERANGE) {
                 fprintf(stderr, "fbmq reap: invalid lease: %s\n", argv[i]);
                 return 1;
             }
@@ -332,7 +412,10 @@ static int cmd_reap(int argc, char **argv)
     int t = 0;
     if (do_ttl) {
         t = fbmq_reap_ttl(&q);
-        if (t < 0) t = 0;
+        if (t < 0) {
+            fprintf(stderr, "fbmq reap: ttl scan failed: %s\n", strerror(errno));
+            return 1;
+        }
     }
 
     fprintf(stderr, "Reaped %d stale, %d expired\n", n, t);
@@ -347,8 +430,9 @@ static int cmd_purge(int argc, char **argv)
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-a") == 0 && i+1 < argc) {
             char *end;
+            errno = 0;
             long v = strtol(argv[++i], &end, 10);
-            if (*end != '\0' || v < 0 || v > INT_MAX) {
+            if (*end != '\0' || v < 0 || v > INT_MAX || errno == ERANGE) {
                 fprintf(stderr, "fbmq purge: invalid age: %s\n", argv[i]);
                 return 1;
             }
@@ -374,9 +458,6 @@ static int cmd_inspect(int argc, char **argv)
     }
 
     printf("ID:             %s\n", msg.header.id);
-    char bucket[3];
-    fbmq_bucket(msg.header.id, bucket);
-    printf("Bucket:         %s\n", bucket);
     printf("Created:        %s\n", msg.header.created_at);
     printf("Created by:     %s\n", msg.header.created_by);
     printf("Priority:       %s\n", fbmq_priority_str(msg.header.priority));

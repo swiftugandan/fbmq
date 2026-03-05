@@ -26,9 +26,7 @@ while [ "$(fbmq depth "$QUEUE_ROOT/ballot")" -lt 3 ]; do
 done
 
 # Tally
-for f in "$QUEUE_ROOT/ballot/pending/"*/; do
-  for msg in "$f"*.md; do
-    [ -f "$msg" ] && fbmq cat "$msg"
-    echo "---"
-  done
+for msg in "$QUEUE_ROOT/ballot/pending/"*.md; do
+  [ -f "$msg" ] && fbmq cat "$msg"
+  echo "---"
 done

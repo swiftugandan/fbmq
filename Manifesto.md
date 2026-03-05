@@ -38,14 +38,38 @@ No server process to monitor. No ports to open. No configuration files
 to maintain. It builds with `make` and runs on any POSIX system with a
 filesystem. That's the dependency list.
 
+### Simplicity over cleverness
+
+A flat directory is the right data structure until measurements prove
+otherwise. fbmq does not shard, partition, or pre-allocate. `pending/`
+is a single directory. When you need priority levels, it becomes four
+directories — one per level. That is the entire topology. Cleverness
+has a maintenance cost that almost always exceeds the performance gain
+it was designed to provide. Start simple, measure, and only then add
+complexity — and if the measurements never justify it, neither does the
+code.
+
+### No FIFO guarantee
+
+fbmq does not guarantee message ordering. `pop` grabs the first
+available entry from `readdir` — the order is filesystem-dependent and
+varies across ext4, XFS, APFS, and tmpfs. Sorting entries for strict
+FIFO would cost O(n) per pop, a price most workloads never need to pay.
+Under multi-consumer contention, ordering is already non-deterministic:
+multiple consumers race on `rename(2)`, so who gets which message
+depends on scheduling. If your workflow requires ordered processing,
+enforce it at the application layer — sequence numbers in headers,
+correlation IDs, or explicit dependencies between messages.
+
 ### Explicit over automatic
 
 There are no background threads. No hidden garbage collection. No
 surprise compaction. You call `reap` when you want to reclaim stale
 messages. You call `purge` when you want to clean old completions. You
 choose whether to fsync per message or skip it entirely with
-`--no-fsync`. Every operational decision is yours to make, not the
-queue's.
+`--no-fsync`. You set the maximum queue size at init time — the default
+is 10,000 pending messages, but `--max-pending 0` removes the limit
+entirely. Every operational decision is yours to make, not the queue's.
 
 ### One tool, one output
 

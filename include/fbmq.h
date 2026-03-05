@@ -14,11 +14,7 @@
 /* ── Shared library visibility ── */
 
 #if defined(FBMQ_SHARED_BUILD)
-  #if defined(_WIN32)
-    #define FBMQ_API __declspec(dllexport)
-  #else
-    #define FBMQ_API __attribute__((visibility("default")))
-  #endif
+  #define FBMQ_API __attribute__((visibility("default")))
 #else
   #define FBMQ_API
 #endif
@@ -29,17 +25,14 @@
 #include <time.h>
 
 #define FBMQ_VERSION        "1.0.0"
-#define FBMQ_ID_LEN         32       /* md5 hex digest */
-#define FBMQ_BUCKET_COUNT   256
-#define FBMQ_BUCKET_LEN     2
+#define FBMQ_ID_LEN         32       /* 32-char hex ID */
 #define FBMQ_MAX_PATH       4096
 #define FBMQ_DEFAULT_RETRIES    3
 #define FBMQ_DEFAULT_LEASE      300  /* seconds */
 #define FBMQ_DEFAULT_PURGE_AGE  604800 /* 7 days */
 #define FBMQ_MAX_MESSAGE_SIZE   (64 * 1024 * 1024) /* 64 MiB */
 #define FBMQ_SCAN_RETRIES       3
-/* FBMQ_SCAN_CANDIDATES removed: scan all entries for correct FIFO order */
-#define FBMQ_DEFAULT_HINTS_TTL  2    /* seconds before scan hints expire */
+#define FBMQ_DEFAULT_MAX_PENDING 10000
 
 /* ── Priority ── */
 
@@ -60,7 +53,7 @@ typedef enum {
 } fbmq_fsync_mode_t;
 
 FBMQ_API const char *fbmq_priority_str(fbmq_priority_t p);
-FBMQ_API fbmq_priority_t fbmq_priority_parse(const char *s);
+FBMQ_API int fbmq_priority_parse(const char *s);
 
 /* ── Message ── */
 
@@ -87,9 +80,6 @@ FBMQ_API void fbmq_message_free(fbmq_message_t *msg);
 /* ── Queue handle ──
  *
  * NOT thread-safe. Each thread must use its own fbmq_queue_t handle.
- * The scan_hints bitmap is a process-local optimization that uses
- * non-atomic read-modify-write — sharing a handle across threads
- * will silently corrupt hint state.
  *
  * Concurrent access across processes (each with their own handle)
  * is safe by design — coordination is via rename(2) only.
@@ -103,16 +93,7 @@ typedef struct {
     fbmq_fsync_mode_t fsync_mode;    /* FULL (default), BATCH, or NONE */
     mode_t   file_mode;              /* default 0640 */
     mode_t   dir_mode;               /* default 0750 */
-
-    /* Adaptive scan hints: bitmap of buckets recently seen as empty.
-     * 128 bytes = 1024 bits covers 256 buckets × 4 priority levels.
-     * Non-priority mode uses only the first 32 bytes (256 bits).
-     *
-     * NOTE: Process-local, not persisted. Only benefits long-running
-     * library consumers that call fbmq_dequeue() in a loop. */
-    uint8_t  scan_hints[128];
-    time_t   hints_reset_at;         /* last time hints were cleared */
-    int      hints_ttl;              /* seconds before full re-scan */
+    int64_t  max_pending;            /* 0 = unlimited */
 } fbmq_queue_t;
 
 FBMQ_API void fbmq_queue_defaults(fbmq_queue_t *q);
@@ -149,7 +130,6 @@ FBMQ_API int fbmq_purge(fbmq_queue_t *q, int max_age_seconds);
 /* ── Utilities ── */
 
 FBMQ_API int  fbmq_generate_id(char *out);
-FBMQ_API void fbmq_bucket(const char *id, char *out);
 FBMQ_API int fbmq_parse_file(const char *path, fbmq_message_t *msg);
 FBMQ_API int fbmq_parse_headers(const char *path, fbmq_message_t *msg);
 

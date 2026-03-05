@@ -50,7 +50,7 @@ endif
 
 # ── Sources ──
 
-LIB_SRCS := src/fbmq.c src/md5.c
+LIB_SRCS := src/fbmq.c
 CLI_SRCS := src/fbmq_main.c
 
 # ── Object directories ──
@@ -92,10 +92,10 @@ $(SHARED_LIB): $(SHARED_OBJS)
 
 # ── Object compilation ──
 
-build/static/%.o: src/%.c include/fbmq.h src/md5.h | build/static
+build/static/%.o: src/%.c include/fbmq.h | build/static
 	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $<
 
-build/shared/%.o: src/%.c include/fbmq.h src/md5.h | build/shared
+build/shared/%.o: src/%.c include/fbmq.h | build/shared
 	$(CC) $(CFLAGS) $(CPPFLAGS) -fPIC -DFBMQ_SHARED_BUILD -fvisibility=hidden -c -o $@ $<
 
 build/static build/shared:
@@ -137,6 +137,7 @@ install-bin: $(BIN)
 	install -d $(DESTDIR)$(BINDIR)
 	install -m 755 scripts/fbmq-reaper $(DESTDIR)$(BINDIR)/fbmq-reaper
 	install -m 755 scripts/fbmq-worker $(DESTDIR)$(BINDIR)/fbmq-worker
+	install -m 755 scripts/fbmq-dashboard $(DESTDIR)$(BINDIR)/fbmq-dashboard
 	install -d $(DESTDIR)$(MANDIR)/man1
 	install -m 644 man/man1/fbmq-worker.1 $(DESTDIR)$(MANDIR)/man1/fbmq-worker.1
 
@@ -157,6 +158,7 @@ uninstall:
 	rm -f $(DESTDIR)$(BINDIR)/$(BIN)
 	rm -f $(DESTDIR)$(BINDIR)/fbmq-reaper
 	rm -f $(DESTDIR)$(BINDIR)/fbmq-worker
+	rm -f $(DESTDIR)$(BINDIR)/fbmq-dashboard
 	rm -f $(DESTDIR)$(MANDIR)/man1/fbmq-worker.1
 	rm -f $(DESTDIR)$(MANDIR)/man1/fbmq.1
 	rm -f $(DESTDIR)$(MANDIR)/man5/fbmq-message.5
