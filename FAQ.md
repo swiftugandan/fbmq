@@ -30,11 +30,11 @@ loop.
 
 ### How do I express task dependencies (task B waits for task A)?
 
-Put dependency IDs in a header and check at pop time:
+Put dependency IDs in the `Custom:` block and check at pop time:
 
 ```markdown
 Correlation-Id: plan-42
-Tags: step-2, depends
+Tags: step-2
 Custom:
   depends-on: a3f2e1b4c5d6a7b8c9d0e1f2a3b4c5d6
 ```
@@ -93,16 +93,19 @@ read time.
 
 ### How do I implement request-reply (send a task, get a result)?
 
-Use two queues and `Correlation-Id`:
+Use two queues and `Correlation-Id`. Optionally stash the reply queue
+name in `Custom:` so workers know where to send results:
 
 ```bash
-# Orchestrator pushes a task
-ID=$(echo "Summarize this document" | fbmq push tasks/ --correlation-id req-001)
+# Orchestrator pushes a task with a reply-to convention
+echo "Summarize this document" \
+  | fbmq push tasks/ --correlation-id req-001 --custom "reply-to: results/"
 
-# Worker pops, does the work, pushes the result
+# Worker pops, does the work, pushes the result to the reply queue
 TASK=$(fbmq pop tasks/)
 CORR=$(grep '^Correlation-Id:' "$TASK" | cut -d' ' -f2)
-echo "Here is the summary..." | fbmq push results/ --correlation-id "$CORR"
+REPLY_Q=$(grep '  reply-to:' "$TASK" | awk '{print $2}')
+echo "Here is the summary..." | fbmq push "$REPLY_Q" --correlation-id "$CORR"
 fbmq ack tasks/ "$TASK"
 
 # Orchestrator watches for the reply
@@ -110,7 +113,8 @@ inotifywait -qq -e moved_to results/pending/
 REPLY=$(fbmq pop results/)
 ```
 
-No special reply mechanism needed — two queues and a shared ID.
+No special mechanism needed — `Custom:` carries the convention, two queues
+and a shared ID do the rest.
 
 ---
 
