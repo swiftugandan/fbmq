@@ -328,6 +328,9 @@ static int parse_headers(const char *header, size_t header_len,
         } else if (strcmp(key, "correlation_id") == 0) {
             if (strlen(val) >= sizeof(h->correlation_id)) { free(buf); errno = EINVAL; return -1; }
             snprintf(h->correlation_id, sizeof(h->correlation_id), "%s", val);
+        } else if (strcmp(key, "reply_to") == 0) {
+            if (strlen(val) >= sizeof(h->reply_to)) { free(buf); errno = EINVAL; return -1; }
+            snprintf(h->reply_to, sizeof(h->reply_to), "%s", val);
         } else if (strcmp(key, "tags") == 0) {
             if (strlen(val) >= sizeof(h->tags)) { free(buf); errno = EINVAL; return -1; }
             snprintf(h->tags, sizeof(h->tags), "%s", val);
@@ -738,6 +741,8 @@ int fbmq_serialize(const fbmq_message_t *msg, char **out, size_t *outlen)
         sb_printf(&sb, "Tags: %s\n", h->tags);
     if (h->correlation_id[0])
         sb_printf(&sb, "Correlation-Id: %s\n", h->correlation_id);
+    if (h->reply_to[0])
+        sb_printf(&sb, "Reply-To: %s\n", h->reply_to);
     if (h->depends_on[0])
         sb_printf(&sb, "Depends-On: %s\n", h->depends_on);
     if (h->custom[0]) {

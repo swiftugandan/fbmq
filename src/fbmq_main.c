@@ -40,6 +40,7 @@ static void usage(void)
         "  -p, --priority <critical|high|normal|low>\n"
         "  -t, --ttl <seconds>\n"
         "  -c, --correlation-id <id>\n"
+        "  -r, --reply-to <queue-path>\n"
         "  -T, --tag <tag>              (repeatable)\n"
         "  -d, --depends-on <id>        (repeatable)\n"
         "  -b, --created-by <name>\n"
@@ -218,7 +219,7 @@ static int cmd_push(int argc, char **argv)
     const char *dir = argv[0];
     fbmq_priority_t prio = FBMQ_PRIO_NORMAL;
     int ttl = 0, no_fsync = 0, batch_fsync = 0;
-    const char *corr_id = NULL, *created_by = NULL, *infile = NULL;
+    const char *corr_id = NULL, *reply_to = NULL, *created_by = NULL, *infile = NULL;
     char tags[1024] = {0};
     char depends_on[2048] = {0};
 
@@ -258,6 +259,8 @@ static int cmd_push(int argc, char **argv)
         else if ((strcmp(argv[i], "-T") == 0 || strcmp(argv[i], "--tag") == 0) && i+1 < argc) {
             if (append_csv(tags, sizeof(tags), argv[++i], "tags") != 0) return 1;
         }
+        else if ((strcmp(argv[i], "-r") == 0 || strcmp(argv[i], "--reply-to") == 0) && i+1 < argc)
+            reply_to = argv[++i];
         else if ((strcmp(argv[i], "-d") == 0 || strcmp(argv[i], "--depends-on") == 0) && i+1 < argc) {
             if (append_csv(depends_on, sizeof(depends_on), argv[++i], "depends-on") != 0) return 1;
         }
@@ -309,6 +312,10 @@ static int cmd_push(int argc, char **argv)
     if (corr_id) {
         if (validate_header_value(corr_id, "correlation-id") != 0) { free(body); return 1; }
         snprintf(msg.header.correlation_id, sizeof(msg.header.correlation_id), "%s", corr_id);
+    }
+    if (reply_to) {
+        if (validate_header_value(reply_to, "reply-to") != 0) { free(body); return 1; }
+        snprintf(msg.header.reply_to, sizeof(msg.header.reply_to), "%s", reply_to);
     }
     if (tags[0]) {
         if (validate_header_value(tags, "tags") != 0) { free(body); return 1; }
@@ -504,6 +511,8 @@ static int cmd_inspect(int argc, char **argv)
         printf("TTL:            %d seconds\n", msg.header.ttl);
     if (msg.header.correlation_id[0])
         printf("Correlation ID: %s\n", msg.header.correlation_id);
+    if (msg.header.reply_to[0])
+        printf("Reply-To:       %s\n", msg.header.reply_to);
     if (msg.header.tags[0])
         printf("Tags:           %s\n", msg.header.tags);
     if (msg.header.depends_on[0])

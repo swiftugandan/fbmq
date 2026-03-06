@@ -66,6 +66,7 @@ typedef struct {
     int      ttl;               /* seconds, 0 = no expiry */
     char     tags[1024];        /* comma-separated list, e.g. "orders, processing" */
     char     correlation_id[256];
+    char     reply_to[FBMQ_MAX_PATH]; /* queue path for replies */
     char     depends_on[2048];  /* comma-separated dependency IDs */
     char     custom[4096];      /* RFC 822 continuation lines for Custom: block */
 } fbmq_header_t;

@@ -947,6 +947,37 @@ assert_eq "50" "$HERD_TOTAL" "heavy contention: all 50 claimed exactly once"
 HERD_DEPTH=$($FBMQ depth "$HERD_QUEUE")
 assert_eq "0" "$HERD_DEPTH" "heavy contention: queue drained"
 
+# ── reply-to ──
+echo ""
+echo "── reply-to ──"
+RT_QUEUE="$TEST_TMPDIR/rtq"
+$FBMQ init "$RT_QUEUE" --max-pending 0 2>/dev/null
+
+# Header serialized with --reply-to
+RT_ID=$(echo "# Reply test" | $FBMQ push "$RT_QUEUE" --reply-to /tmp/replies)
+RT_FILE=$(find_msg "$RT_QUEUE/pending" "$RT_ID")
+grep -q '^Reply-To: /tmp/replies' "$RT_FILE" && pass "reply-to: header serialized" || fail "reply-to: header missing"
+
+# Short flag -r
+RT_ID2=$(echo "# Short flag" | $FBMQ push "$RT_QUEUE" -r /tmp/results)
+RT_FILE2=$(find_msg "$RT_QUEUE/pending" "$RT_ID2")
+grep -q '^Reply-To: /tmp/results' "$RT_FILE2" && pass "reply-to: short flag -r works" || fail "reply-to: short flag"
+
+# Inspect displays Reply-To
+RT_INSPECT=$($FBMQ inspect "$RT_FILE")
+echo "$RT_INSPECT" | grep -q "Reply-To:" && pass "reply-to: inspect displays it" || fail "reply-to: inspect missing"
+
+# Combined with Correlation-Id
+RT_ID3=$(echo "# Both headers" | $FBMQ push "$RT_QUEUE" -c req-99 -r /tmp/combo)
+RT_FILE3=$(find_msg "$RT_QUEUE/pending" "$RT_ID3")
+grep -q '^Correlation-Id: req-99' "$RT_FILE3" && grep -q '^Reply-To: /tmp/combo' "$RT_FILE3" \
+    && pass "reply-to: combined with correlation-id" || fail "reply-to: combined headers"
+
+# Absent when unset
+RT_ID4=$(echo "# No reply-to" | $FBMQ push "$RT_QUEUE")
+RT_FILE4=$(find_msg "$RT_QUEUE/pending" "$RT_ID4")
+grep -q '^Reply-To:' "$RT_FILE4" && fail "reply-to: present when unset" || pass "reply-to: absent when unset"
+
 # ── depends-on + ready ──
 echo ""
 echo "── depends-on + ready ──"

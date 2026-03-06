@@ -92,18 +92,17 @@ read time.
 
 ### How do I implement request-reply (send a task, get a result)?
 
-Use two queues and `Correlation-Id`. Optionally stash the reply queue
-name in `Custom:` so workers know where to send results:
+Use two queues, `Correlation-Id`, and `Reply-To`:
 
 ```bash
-# Orchestrator pushes a task with a reply-to convention
+# Orchestrator pushes a task with a reply queue
 echo "Summarize this document" \
-  | fbmq push tasks/ --correlation-id req-001 --custom "reply-to: results/"
+  | fbmq push tasks/ --correlation-id req-001 --reply-to results/
 
 # Worker pops, does the work, pushes the result to the reply queue
 TASK=$(fbmq pop tasks/)
 CORR=$(grep '^Correlation-Id:' "$TASK" | cut -d' ' -f2)
-REPLY_Q=$(grep '  reply-to:' "$TASK" | awk '{print $2}')
+REPLY_Q=$(grep '^Reply-To:' "$TASK" | cut -d' ' -f2)
 echo "Here is the summary..." | fbmq push "$REPLY_Q" --correlation-id "$CORR"
 fbmq ack tasks/ "$TASK"
 
@@ -112,7 +111,7 @@ inotifywait -qq -e moved_to results/pending/
 REPLY=$(fbmq pop results/)
 ```
 
-No special mechanism needed — `Custom:` carries the convention, two queues
+No special mechanism needed — `Reply-To` carries the queue path, two queues
 and a shared ID do the rest.
 
 ---

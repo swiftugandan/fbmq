@@ -15,6 +15,7 @@ Retry-Count: 0
 TTL: 3600
 Tags: orders, processing
 Correlation-Id: req-abc-123
+Reply-To: results/
 Depends-On: b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6
 Custom:
   order_id: 12345
@@ -48,6 +49,11 @@ Comma-separated list of labels.
 .TP
 .B correlation_id
 Workflow tracing ID.
+.TP
+.B reply_to
+Queue path where replies should be sent. Informational metadata \(em the
+consumer reads this field and routes accordingly. fbmq does not validate or
+auto-route.
 .TP
 .B depends_on
 Comma-separated list of message IDs that must be in done/ before this message
