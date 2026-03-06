@@ -45,6 +45,13 @@ Correlation ID for workflow tracing.
 .BR \-T ", " \-\-tag " " \fItag\fR
 Add a tag (repeatable).
 .TP
+.BR \-d ", " \-\-depends\-on " " \fIid\fR
+Declare a dependency on another message ID (repeatable). The message will not
+appear in
+.B fbmq ready
+output until all dependencies are in
+.BR done/ .
+.TP
 .BR \-b ", " \-\-created\-by " " \fIname\fR
 Override default created_by.
 .TP
@@ -71,9 +78,10 @@ single journal transaction, so one
 covers all preceding enqueues.
 .TP
 .BI "pop " "dir"
-Claim an available message. Prints the claimed file path to stdout.
-No ordering guarantee is made; see
-.BR fbmq-design (7).
+Claim the oldest available message (FIFO by enqueue timestamp).
+Prints the claimed file path to stdout. See
+.BR fbmq-design (7)
+for contention behaviour.
 The message is on disk \(em read it with
 .BR cat (1)
 or
@@ -99,6 +107,14 @@ skips the TTL expiry scan.
 Delete done messages older than
 .I secs
 (default: 604800 = 7 days).
+.TP
+.BI "ready " "dir"
+List message IDs in pending/ that are ready to process. A message is ready if it
+has no
+.B Depends\-On
+header, or if all dependency IDs exist in
+.BR done/ .
+Prints one ID per line. Exit 0 if any ready, 1 if none.
 .TP
 .BI "inspect " "file"
 Print parsed metadata from a message file.

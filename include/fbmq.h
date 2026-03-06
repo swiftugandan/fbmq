@@ -66,6 +66,7 @@ typedef struct {
     int      ttl;               /* seconds, 0 = no expiry */
     char     tags[1024];        /* comma-separated list, e.g. "orders, processing" */
     char     correlation_id[256];
+    char     depends_on[2048];  /* comma-separated dependency IDs */
     char     custom[4096];      /* RFC 822 continuation lines for Custom: block */
 } fbmq_header_t;
 
@@ -126,6 +127,15 @@ FBMQ_API int fbmq_depth(fbmq_queue_t *q, int64_t *depth);
 FBMQ_API int fbmq_reap(fbmq_queue_t *q);
 FBMQ_API int fbmq_reap_ttl(fbmq_queue_t *q);
 FBMQ_API int fbmq_purge(fbmq_queue_t *q, int max_age_seconds);
+
+/*
+ * List message IDs in pending/ whose dependencies are all satisfied (in done/).
+ * Returns heap array of ID strings; *count = number of IDs.
+ * *count = 0, return NULL → no ready messages (not an error).
+ * *count = -1, return NULL → error (errno set).
+ */
+FBMQ_API char **fbmq_list_ready(fbmq_queue_t *q, int *count);
+FBMQ_API void   fbmq_free_id_list(char **ids, int count);
 
 /* ── Utilities ── */
 

@@ -73,7 +73,7 @@ const char *fbmq_priority_str(fbmq_priority_t p)
 
 int fbmq_priority_parse(const char *s)
 {
-    if (!s) return FBMQ_PRIO_NORMAL;
+    if (!s) return -1;
     if (strcmp(s, "critical") == 0) return FBMQ_PRIO_CRITICAL;
     if (strcmp(s, "high") == 0)     return FBMQ_PRIO_HIGH;
     if (strcmp(s, "normal") == 0)   return FBMQ_PRIO_NORMAL;
@@ -90,8 +90,8 @@ void fbmq_queue_defaults(fbmq_queue_t *q)
     memset(q, 0, sizeof(*q));
     q->max_retries   = FBMQ_DEFAULT_RETRIES;
     q->lease_timeout  = FBMQ_DEFAULT_LEASE;
-    q->file_mode      = 0640;
-    q->dir_mode       = 0750;
+    q->file_mode      = 0640;  /* rw-r----- */
+    q->dir_mode       = 0750;  /* rwxr-x--- */
     q->max_pending    = FBMQ_DEFAULT_MAX_PENDING;
 }
 
@@ -331,6 +331,9 @@ static int parse_headers(const char *header, size_t header_len,
         } else if (strcmp(key, "tags") == 0) {
             if (strlen(val) >= sizeof(h->tags)) { free(buf); errno = EINVAL; return -1; }
             snprintf(h->tags, sizeof(h->tags), "%s", val);
+        } else if (strcmp(key, "depends_on") == 0) {
+            if (strlen(val) >= sizeof(h->depends_on)) { free(buf); errno = EINVAL; return -1; }
+            snprintf(h->depends_on, sizeof(h->depends_on), "%s", val);
         } else if (strcmp(key, "custom") == 0) {
             in_custom = 1;  /* next indented lines go to custom block */
         }
@@ -511,9 +514,8 @@ static int64_t count_md_files(const char *dir, int64_t limit)
             count++;
             if (limit > 0 && count >= limit) break;
         }
-        errno = 0;
     }
-    if (errno) { int e = errno; closedir(d); errno = e; return -1; }
+    if (!ent && errno) { int e = errno; closedir(d); errno = e; return -1; }
     if (closedir(d) != 0) return -1;
     return count;
 }
@@ -554,9 +556,106 @@ int fbmq_depth(fbmq_queue_t *q, int64_t *depth)
     if (path_fmt(proc_dir, sizeof(proc_dir), "%s/processing", q->root) != 0)
         return -1;
     int64_t processing = count_md_files(proc_dir, 0);
+    if (processing < 0) return -1;
 
     *depth = pending + processing;
     return 0;
+}
+
+/* Forward declarations needed by fbmq_list_ready */
+static char **collect_md_entries(const char *dir, int *count_out);
+static void free_entries(char **entries, int count);
+
+/* ────────────────────────────────────────────
+ * Ready-list: pending messages with all deps satisfied
+ * ──────────────────────────────────────────── */
+
+char **fbmq_list_ready(fbmq_queue_t *q, int *count)
+{
+    *count = 0;
+    int cap = 64;
+    char **ids = malloc((size_t)cap * sizeof(char *));
+    if (!ids) { *count = -1; return NULL; }
+
+    char pdir[FBMQ_MAX_PATH];
+    FOR_EACH_PENDING(q, p, pdir, sizeof(pdir)) {
+        int entry_count = 0;
+        char **entries = collect_md_entries(pdir, &entry_count);
+        if (!entries) continue;
+
+        for (int i = 0; i < entry_count; i++) {
+            char filepath[FBMQ_MAX_PATH];
+            if (path_fmt(filepath, sizeof(filepath), "%s/%s", pdir, entries[i]) != 0)
+                continue;
+
+            fbmq_message_t msg = {0};
+            if (fbmq_parse_headers(filepath, &msg) != 0) {
+                fbmq_message_free(&msg);
+                continue;
+            }
+
+            int ready = 1;
+            if (msg.header.depends_on[0]) {
+                char deps[sizeof(msg.header.depends_on)];
+                snprintf(deps, sizeof(deps), "%s", msg.header.depends_on);
+                char *saveptr = NULL;
+                for (char *tok = strtok_r(deps, ",", &saveptr);
+                     tok; tok = strtok_r(NULL, ",", &saveptr)) {
+                    tok = strip(tok);
+                    if (!*tok) continue;
+
+                    char done_path[FBMQ_MAX_PATH];
+                    if (path_fmt(done_path, sizeof(done_path),
+                                 "%s/done/%s.md", q->root, tok) != 0) {
+                        ready = 0; break;
+                    }
+                    struct stat st;
+                    if (stat(done_path, &st) != 0) {
+                        ready = 0; break;
+                    }
+                }
+            }
+
+            if (ready) {
+                if (*count >= cap) {
+                    cap *= 2;
+                    char **tmp = realloc(ids, (size_t)cap * sizeof(char *));
+                    if (!tmp) {
+                        fbmq_message_free(&msg);
+                        free_entries(entries, entry_count);
+                        for (int j = 0; j < *count; j++) free(ids[j]);
+                        free(ids);
+                        *count = -1;
+                        return NULL;
+                    }
+                    ids = tmp;
+                }
+                ids[*count] = strdup(msg.header.id);
+                if (!ids[*count]) {
+                    fbmq_message_free(&msg);
+                    free_entries(entries, entry_count);
+                    for (int j = 0; j < *count; j++) free(ids[j]);
+                    free(ids);
+                    *count = -1;
+                    return NULL;
+                }
+                (*count)++;
+            }
+            fbmq_message_free(&msg);
+        }
+        free_entries(entries, entry_count);
+    }
+
+    if (*count == 0) {
+        free(ids);
+        return NULL;
+    }
+    return ids;
+}
+
+void fbmq_free_id_list(char **ids, int count)
+{
+    free_entries(ids, count);
 }
 
 /* ────────────────────────────────────────────
@@ -639,10 +738,35 @@ int fbmq_serialize(const fbmq_message_t *msg, char **out, size_t *outlen)
         sb_printf(&sb, "Tags: %s\n", h->tags);
     if (h->correlation_id[0])
         sb_printf(&sb, "Correlation-Id: %s\n", h->correlation_id);
-    if (h->custom[0])
+    if (h->depends_on[0])
+        sb_printf(&sb, "Depends-On: %s\n", h->depends_on);
+    if (h->custom[0]) {
+        /* Validate custom block: every line must be indented (continuation
+         * line) or empty, to prevent header injection via the C API. */
+        const char *cp = h->custom;
+        int custom_valid = 1;
+        while (*cp) {
+            if (*cp != ' ' && *cp != '\t' && *cp != '\n') {
+                custom_valid = 0;
+                break;
+            }
+            /* Skip to next line */
+            const char *eol = strchr(cp, '\n');
+            if (!eol) break; /* last line without newline — already validated above */
+            cp = eol + 1;
+        }
+        if (!custom_valid) {
+            free(sb.data);
+            errno = EINVAL;
+            return -1;
+        }
         sb_printf(&sb, "Custom:\n%s", h->custom);
+    }
 
     sb_printf(&sb, "\n");  /* blank line separates headers from body */
+
+    /* Check for OOM before appending potentially large body */
+    if (!sb.data) { errno = ENOMEM; return -1; }
 
     if (msg->body && msg->body_len > 0)
         sb_append(&sb, msg->body, msg->body_len);
@@ -889,14 +1013,21 @@ int fbmq_enqueue(fbmq_queue_t *q, fbmq_message_t *msg)
                  "%d@%s", (int)getpid(), hostname);
     }
 
-    /* Max pending check — intentional count-on-read, consistent with
-     * fbmq_depth(). Soft limit: under concurrent push, up to N concurrent
-     * pushers can overshoot max_pending by N (each passes the check before
-     * any rename completes). This is by design — max_pending is a capacity
-     * hint, not a hard guarantee. See fbmq-design(7). */
+    /* Max pending check — counts both pending/ and processing/ to match
+     * fbmq_depth() semantics. Prevents bypassing the limit by leaving
+     * messages in processing without acking. Soft limit: under concurrent
+     * push, up to N concurrent pushers can overshoot by N. See fbmq-design(7). */
     if (q->max_pending > 0) {
         int64_t pending = count_pending(q, q->max_pending);
         if (pending < 0) return -1;
+        if (pending < q->max_pending) {
+            char proc_dir[FBMQ_MAX_PATH];
+            if (path_fmt(proc_dir, sizeof(proc_dir), "%s/processing", q->root) != 0)
+                return -1;
+            int64_t processing = count_md_files(proc_dir, q->max_pending - pending);
+            if (processing < 0) return -1;
+            pending += processing;
+        }
         if (pending >= q->max_pending) {
             errno = ENOSPC;
             return -1;
@@ -976,95 +1107,79 @@ int fbmq_sync(fbmq_queue_t *q)
  *          (FIX #19: deduplicated claim logic)
  * ──────────────────────────────────────────── */
 
+static char **collect_md_entries(const char *dir, int *count_out);
+static void free_entries(char **entries, int count);
+
+static int cmp_entry_name(const void *a, const void *b)
+{
+    return strcmp(*(const char *const *)a, *(const char *const *)b);
+}
+
 /*
- * Scan a single directory for the first .md file and try to claim it.
+ * Scan a single directory for the oldest .md file and try to claim it.
  * Returns: 0=claimed, 1=nothing found, -1=error.
  *
- * Complexity: O(1) amortized — grabs the first available .md entry from
- * readdir rather than scanning for the lexicographic minimum.
- *
- * Design: consumers grab any available message. rename(2) serializes
- * access — losers get ENOENT and retry. No FIFO guarantee: readdir
- * order is filesystem-dependent and under contention ordering is
- * already non-deterministic.
+ * Collects all .md entries, sorts by filename (which embeds a fixed-width
+ * enqueue timestamp), then iterates oldest-first. rename(2) serializes
+ * access — losers get ENOENT and fall through to the next-oldest entry.
+ * Single consumer = strict FIFO. Multi-consumer = best-effort FIFO.
  */
 static int scan_and_claim(fbmq_queue_t *q, const char *scan_dir,
                           char *claimed_path, size_t pathlen)
 {
     for (int attempt = 0; attempt < FBMQ_SCAN_RETRIES; attempt++) {
-        DIR *d = opendir(scan_dir);
-        if (!d) return 1;
+        int count = 0;
+        char **entries = collect_md_entries(scan_dir, &count);
+        if (count < 0) return -1;         /* error (errno set) */
+        if (count == 0) { free(entries); return 1; } /* empty directory */
 
-        /* Try to claim any .md entry directly from readdir — on ENOENT
-         * (race lost), continue to the next entry instead of restarting.
-         * 256 bytes is safe: max legitimate filename is ~56 chars
-         * (<19-digit ns timestamp>.<32-hex id>.md = 55 chars). */
-        char entry_name[256];
-        int found_any = 0;
+        qsort(entries, (size_t)count, sizeof(char *), cmp_entry_name);
 
-        struct dirent *ent;
-        errno = 0;
-        while ((ent = readdir(d)) != NULL) {
-            size_t nlen = strlen(ent->d_name);
-            if (nlen <= 3 || strcmp(ent->d_name + nlen - 3, ".md") != 0) {
-                errno = 0;
-                continue;
-            }
-            if (nlen >= sizeof(entry_name)) {
-                fprintf(stderr, "fbmq: warning: skipping oversized filename in %s "
-                        "(length %zu, max %zu)\n", scan_dir, nlen, sizeof(entry_name) - 1);
-                errno = 0;
-                continue;
-            }
-            found_any = 1;
-            snprintf(entry_name, sizeof(entry_name), "%s", ent->d_name);
-
+        int found_claimable = 0;
+        for (int i = 0; i < count; i++) {
             char src[FBMQ_MAX_PATH];
-            if (path_fmt(src, sizeof(src), "%s/%s", scan_dir, entry_name) != 0) {
-                closedir(d);
+            if (path_fmt(src, sizeof(src), "%s/%s", scan_dir, entries[i]) != 0) {
+                free_entries(entries, count);
                 return -1;
             }
 
             struct timespec claim_ts;
             if (clock_gettime(CLOCK_REALTIME, &claim_ts) != 0) {
-                closedir(d);
+                free_entries(entries, count);
                 return -1;
             }
 
-            /* Strip enqueue timestamp prefix from entry_name so claimed path
-             * becomes <claim_ts>.<hash>.md instead of <claim_ts>.<enqueue_ts>.<hash>.md */
-            const char *base = entry_name;
+            /* Strip enqueue timestamp prefix so claimed path
+             * becomes <claim_ts>.<hash>.md */
+            const char *base = entries[i];
             const char *p = base;
             while (*p >= '0' && *p <= '9') p++;
             if (*p == '.' && p > base) base = p + 1;
 
             if (path_fmt(claimed_path, pathlen, "%s/processing/%ld%09ld.%s",
                          q->root, (long)claim_ts.tv_sec, (long)claim_ts.tv_nsec, base) != 0) {
-                closedir(d);
+                free_entries(entries, count);
                 return -1;
             }
 
             if (rename(src, claimed_path) == 0) {
-                closedir(d);
+                free_entries(entries, count);
                 return 0; /* claimed */
             }
 
             if (errno != ENOENT) {
-                closedir(d);
+                free_entries(entries, count);
                 return -1; /* real error */
             }
 
-            /* ENOENT = race lost, try next entry */
-            errno = 0;
-            continue;
+            found_claimable = 1; /* at least one entry existed (race lost) */
         }
-        if (!ent && errno) { closedir(d); return -1; }
-        closedir(d);
+        free_entries(entries, count);
 
-        if (!found_any)
-            return 1; /* empty directory */
+        if (!found_claimable)
+            return 1; /* all entries vanished but none raced (shouldn't happen) */
 
-        /* All entries in this pass were raced away, retry with fresh readdir */
+        /* All entries in this pass were raced away, retry with fresh scan */
     }
 
     return 1; /* exhausted retries */
@@ -1154,11 +1269,9 @@ int fbmq_fail(fbmq_queue_t *q, const char *claimed_path)
     }
 
     /* Crash-safe rewrite: write to .tmp/, rename to destination, unlink claimed.
-     * WARNING: Not truly atomic — there is a window between rename(dest) and
-     * unlink(claimed) where both files exist. A crash in this window causes
-     * double delivery if the reaper is not running. Correctness requires
-     * periodic reap (fbmq reap / fbmq-reaper cron job). On Linux, this could
-     * be solved with renameat2(RENAME_EXCHANGE), but we prioritize portability. */
+     * Ordering: rename(dest) before unlink(claimed) ensures at-least-once
+     * delivery on crash. A crash between rename and unlink leaves a duplicate
+     * that the reaper's hash_exists_elsewhere() will clean up. */
     char tmp_path[FBMQ_MAX_PATH];
     if (path_fmt(tmp_path, sizeof(tmp_path), "%s/.tmp/nack-%s", q->root, orig) != 0) {
         free(buf); fbmq_message_free(&msg); return -1;
@@ -1197,13 +1310,17 @@ int fbmq_fail(fbmq_queue_t *q, const char *claimed_path)
         }
     }
 
+    /* Rename the .tmp/ copy into place BEFORE unlinking the claimed file.
+     * This creates a brief duplication window (message in both processing/
+     * and pending/failed/), but a crash at any point leaves at least one
+     * copy — at-least-once beats at-most-once for a message queue.
+     * The reaper's hash_exists_elsewhere() handles the duplicate. */
     if (rename(tmp_path, dest) != 0) {
         unlink(tmp_path); fbmq_message_free(&msg); return -1;
     }
     if (unlink(claimed_path) != 0 && errno != ENOENT) {
-        fprintf(stderr, "fbmq: warning: failed to unlink claimed file %s: %s "
-                "(orphan in processing/ — reaper will clean up)\n",
-                claimed_path, strerror(errno));
+        /* Non-fatal: the file is already safely in dest.
+         * The reaper will clean up the orphan in processing/. */
     }
 
     if (q->fsync_mode == FBMQ_FSYNC_FULL) {
@@ -1230,8 +1347,6 @@ int fbmq_fail(fbmq_queue_t *q, const char *claimed_path)
 /* ────────────────────────────────────────────
  * Reapers (collect-then-act to avoid readdir-while-modifying)
  * ──────────────────────────────────────────── */
-
-static void free_entries(char **entries, int count);
 
 /* Collect .md filenames from a directory into a heap-allocated array.
  * Caller must free each entry and the array itself.
@@ -1284,7 +1399,8 @@ static char **collect_md_entries(const char *dir, int *count_out)
         return NULL;
     }
     if (n > INT_MAX) {
-        free_entries(entries, (int)INT_MAX);
+        for (size_t j = 0; j < n; j++) free(entries[j]);
+        free(entries);
         *count_out = -1;
         errno = EOVERFLOW;
         return NULL;
@@ -1365,8 +1481,9 @@ int fbmq_reap(fbmq_queue_t *q)
 
     for (int i = 0; i < count; i++) {
         char *endptr;
+        errno = 0;
         long long raw_ts = strtoll(entries[i], &endptr, 10);
-        if (raw_ts <= 0 || *endptr != '.') continue;
+        if (raw_ts <= 0 || *endptr != '.' || errno == ERANGE) continue;
 
         /* Claim timestamp is <sec><09nsec> — extract seconds by dividing out nanoseconds */
         time_t claimed_at = (time_t)(raw_ts / 1000000000LL);

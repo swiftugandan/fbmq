@@ -30,30 +30,29 @@ loop.
 
 ### How do I express task dependencies (task B waits for task A)?
 
-Put dependency IDs in the `Custom:` block and check at pop time:
-
-```markdown
-Correlation-Id: plan-42
-Tags: step-2
-Custom:
-  depends-on: a3f2e1b4c5d6a7b8c9d0e1f2a3b4c5d6
-```
-
-A shell scheduler enforces the dependency:
+Use the `Depends-On` header and `fbmq ready`:
 
 ```bash
-msg=$(fbmq pop "$QUEUE")
-dep=$(grep '  depends-on:' "$msg" | awk '{print $2}')
-if [ -n "$dep" ]; then
-  find "$QUEUE/done" -name "*${dep}*" | grep -q . || {
-    fbmq nack "$QUEUE" "$msg"
-    exit 0
-  }
-fi
-# All dependencies met — process the task
+A=$(echo "task A" | fbmq push "$QUEUE")
+B=$(echo "task B" | fbmq push "$QUEUE" -d "$A")
+C=$(echo "task C" | fbmq push "$QUEUE" -d "$A" -d "$B")
 ```
 
-Enforcement stays in the shell — *"Explicit over automatic."*
+`fbmq ready` lists only messages whose dependencies are all in `done/`:
+
+```bash
+fbmq ready "$QUEUE"   # prints A only (B and C have unmet deps)
+
+# Process A...
+CLAIMED=$(fbmq pop "$QUEUE")
+fbmq ack "$QUEUE" "$CLAIMED"
+
+fbmq ready "$QUEUE"   # now prints B (A is in done/)
+```
+
+`ready` is a query — it doesn't touch `pop` or change the queue. Your
+scheduler decides what to do with the list. Enforcement stays in the
+shell — *"Explicit over automatic."*
 
 ### How do I fan out a plan into parallel sub-tasks?
 

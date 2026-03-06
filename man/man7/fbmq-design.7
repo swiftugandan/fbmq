@@ -39,19 +39,19 @@ the cap. Fixing this TOCTOU window would require file locking, which
 contradicts the lock-free rename(2)-only design. The overshoot is bounded
 by the number of concurrent producers and is acceptable in practice.
 .SH DEQUEUE CONTENTION
-Pop grabs the first available .md entry returned by
-.BR readdir (3)
-and attempts to claim it via
+Pop collects all pending .md entries, sorts them by filename (which embeds
+a fixed-width enqueue timestamp), and attempts to claim the oldest via
 .BR rename (2).
 If another consumer claimed it first, the rename fails with ENOENT and
-the caller retries (up to \fBFBMQ_SCAN_RETRIES\fR times).
+pop falls through to the next-oldest entry. If all entries are raced away,
+the scan retries (up to \fBFBMQ_SCAN_RETRIES\fR times).
 .PP
-No ordering guarantee is made: readdir order is filesystem-dependent and
-varies across ext4, XFS, APFS, and tmpfs. Under multi-consumer contention,
-ordering is inherently non-deterministic. If your workload requires
-ordered processing, enforce it at the application layer (e.g. sequence
-numbers in headers or correlation IDs). For workloads with many consumers,
-enable priority directories to spread load across four subdirectories.
+A single consumer gets strict FIFO ordering. Under multi-consumer
+contention, all consumers attempt the oldest message first \(em one wins
+the rename, others fall through to next-oldest. This provides best-effort
+FIFO: the oldest message is always attempted first, but scheduling
+determines which consumer gets it. The sort costs O(n\ log\ n) per pop,
+negligible for typical queue sizes.
 .SH RELIABILITY
 At-least-once delivery. Lease-based reaping. Dead-letter after max retries.
 TTL expiry for time-bounded messages.

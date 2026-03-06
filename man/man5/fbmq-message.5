@@ -15,6 +15,7 @@ Retry-Count: 0
 TTL: 3600
 Tags: orders, processing
 Correlation-Id: req-abc-123
+Depends-On: b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6
 Custom:
   order_id: 12345
 
@@ -47,6 +48,11 @@ Comma-separated list of labels.
 .TP
 .B correlation_id
 Workflow tracing ID.
+.TP
+.B depends_on
+Comma-separated list of message IDs that must be in done/ before this message
+is considered ready. Used with
+.BR "fbmq ready" .
 .TP
 .B custom
 Arbitrary continuation lines. Passed through by the queue.

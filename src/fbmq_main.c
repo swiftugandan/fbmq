@@ -31,6 +31,7 @@ static void usage(void)
         "  reap    <dir> [-l secs] [--no-ttl]       Reclaim stale processing msgs\n"
         "  purge   <dir> [-a secs]                 Delete old done messages\n"
         "  sync    <dir>                           Flush deferred dir fsyncs\n"
+        "  ready   <dir>                           List IDs ready to process\n"
         "  inspect <file>                          Show message metadata\n"
         "  cat     <file>                          Print message body only\n"
         "  version                                 Print version\n"
@@ -40,6 +41,7 @@ static void usage(void)
         "  -t, --ttl <seconds>\n"
         "  -c, --correlation-id <id>\n"
         "  -T, --tag <tag>              (repeatable)\n"
+        "  -d, --depends-on <id>        (repeatable)\n"
         "  -b, --created-by <name>\n"
         "      --no-fsync               Skip fsync (tmpfs mode)\n"
         "      --batch-fsync            Defer dir fsync (use with fbmq sync)\n"
@@ -100,6 +102,38 @@ static char *read_file(const char *path, size_t *len)
 }
 
 static void load_max_pending(fbmq_queue_t *q);
+
+/* Reject header values containing newlines or control characters (header injection) */
+static int validate_header_value(const char *val, const char *name)
+{
+    for (const char *p = val; *p; p++) {
+        if (*p == '\n' || *p == '\r' || (*p < 0x20 && *p != '\t')) {
+            fprintf(stderr, "fbmq push: invalid character in %s (newlines/control chars not allowed)\n", name);
+            return -1;
+        }
+    }
+    return 0;
+}
+
+/* Append a value to a comma-separated buffer (e.g. tags, depends-on). Returns 0 on success. */
+static int append_csv(char *buf, size_t bufsz, const char *item, const char *field_name)
+{
+    size_t pos = strlen(buf);
+    int needed = 0;
+    if (pos > 0)
+        needed = snprintf(buf + pos, bufsz - pos, ", ");
+    if (needed < 0 || pos + (size_t)needed >= bufsz) {
+        fprintf(stderr, "fbmq push: %s exceeds %zu byte limit\n", field_name, bufsz - 1);
+        return -1;
+    }
+    pos += (size_t)needed;
+    int wrote = snprintf(buf + pos, bufsz - pos, "%s", item);
+    if (wrote < 0 || pos + (size_t)wrote >= bufsz) {
+        fprintf(stderr, "fbmq push: %s exceeds %zu byte limit\n", field_name, bufsz - 1);
+        return -1;
+    }
+    return 0;
+}
 
 static fbmq_queue_t make_queue(const char *dir)
 {
@@ -186,6 +220,7 @@ static int cmd_push(int argc, char **argv)
     int ttl = 0, no_fsync = 0, batch_fsync = 0;
     const char *corr_id = NULL, *created_by = NULL, *infile = NULL;
     char tags[1024] = {0};
+    char depends_on[2048] = {0};
 
     int end_of_opts = 0;
     for (int i = 1; i < argc; i++) {
@@ -221,20 +256,10 @@ static int cmd_push(int argc, char **argv)
         else if ((strcmp(argv[i], "-b") == 0 || strcmp(argv[i], "--created-by") == 0) && i+1 < argc)
             created_by = argv[++i];
         else if ((strcmp(argv[i], "-T") == 0 || strcmp(argv[i], "--tag") == 0) && i+1 < argc) {
-            size_t pos = strlen(tags);
-            int needed = 0;
-            if (pos > 0)
-                needed = snprintf(tags + pos, sizeof(tags) - pos, ", ");
-            if (needed < 0 || pos + (size_t)needed >= sizeof(tags)) {
-                fprintf(stderr, "fbmq push: tags exceed %zu byte limit\n", sizeof(tags) - 1);
-                return 1;
-            }
-            pos += (size_t)needed;
-            int wrote = snprintf(tags + pos, sizeof(tags) - pos, "%s", argv[++i]);
-            if (wrote < 0 || pos + (size_t)wrote >= sizeof(tags)) {
-                fprintf(stderr, "fbmq push: tags exceed %zu byte limit\n", sizeof(tags) - 1);
-                return 1;
-            }
+            if (append_csv(tags, sizeof(tags), argv[++i], "tags") != 0) return 1;
+        }
+        else if ((strcmp(argv[i], "-d") == 0 || strcmp(argv[i], "--depends-on") == 0) && i+1 < argc) {
+            if (append_csv(depends_on, sizeof(depends_on), argv[++i], "depends-on") != 0) return 1;
         }
         else if (strcmp(argv[i], "--no-fsync") == 0)
             no_fsync = 1;
@@ -281,9 +306,22 @@ static int cmd_push(int argc, char **argv)
     msg.body = body;
     msg.body_len = body_len;
 
-    if (corr_id) snprintf(msg.header.correlation_id, sizeof(msg.header.correlation_id), "%s", corr_id);
-    if (tags[0]) snprintf(msg.header.tags, sizeof(msg.header.tags), "%s", tags);
-    if (created_by) snprintf(msg.header.created_by, sizeof(msg.header.created_by), "%s", created_by);
+    if (corr_id) {
+        if (validate_header_value(corr_id, "correlation-id") != 0) { free(body); return 1; }
+        snprintf(msg.header.correlation_id, sizeof(msg.header.correlation_id), "%s", corr_id);
+    }
+    if (tags[0]) {
+        if (validate_header_value(tags, "tags") != 0) { free(body); return 1; }
+        snprintf(msg.header.tags, sizeof(msg.header.tags), "%s", tags);
+    }
+    if (depends_on[0]) {
+        if (validate_header_value(depends_on, "depends-on") != 0) { free(body); return 1; }
+        snprintf(msg.header.depends_on, sizeof(msg.header.depends_on), "%s", depends_on);
+    }
+    if (created_by) {
+        if (validate_header_value(created_by, "created-by") != 0) { free(body); return 1; }
+        snprintf(msg.header.created_by, sizeof(msg.header.created_by), "%s", created_by);
+    }
 
     if (fbmq_enqueue(&q, &msg) != 0) {
         if (errno == ENOSPC) {
@@ -468,6 +506,8 @@ static int cmd_inspect(int argc, char **argv)
         printf("Correlation ID: %s\n", msg.header.correlation_id);
     if (msg.header.tags[0])
         printf("Tags:           %s\n", msg.header.tags);
+    if (msg.header.depends_on[0])
+        printf("Depends-On:     %s\n", msg.header.depends_on);
     if (msg.header.custom[0])
         printf("Custom:\n%s", msg.header.custom);
     printf("Body:           %zu bytes\n", msg.body_len);
@@ -493,6 +533,19 @@ static int cmd_cat(int argc, char **argv)
     return 0;
 }
 
+static int cmd_ready(int argc, char **argv)
+{
+    if (argc < 1) { fprintf(stderr, "fbmq ready: missing queue-dir\n"); return 1; }
+    fbmq_queue_t q = make_queue(argv[0]);
+    int count = 0;
+    char **ids = fbmq_list_ready(&q, &count);
+    if (count < 0) { fprintf(stderr, "fbmq ready: %s\n", strerror(errno)); return 1; }
+    for (int i = 0; i < count; i++)
+        printf("%s\n", ids[i]);
+    fbmq_free_id_list(ids, count);
+    return count > 0 ? 0 : 1;
+}
+
 /* ── Main ── */
 
 int main(int argc, char **argv)
@@ -512,6 +565,7 @@ int main(int argc, char **argv)
     if (strcmp(cmd, "depth") == 0)      return cmd_depth(sa, sv);
     if (strcmp(cmd, "reap") == 0)       return cmd_reap(sa, sv);
     if (strcmp(cmd, "purge") == 0)      return cmd_purge(sa, sv);
+    if (strcmp(cmd, "ready") == 0)      return cmd_ready(sa, sv);
     if (strcmp(cmd, "inspect") == 0)    return cmd_inspect(sa, sv);
     if (strcmp(cmd, "cat") == 0)        return cmd_cat(sa, sv);
     if (strcmp(cmd, "version") == 0) {

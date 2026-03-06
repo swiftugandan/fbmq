@@ -49,17 +49,14 @@ it was designed to provide. Start simple, measure, and only then add
 complexity — and if the measurements never justify it, neither does the
 code.
 
-### No FIFO guarantee
+### Best-effort FIFO
 
-fbmq does not guarantee message ordering. `pop` grabs the first
-available entry from `readdir` — the order is filesystem-dependent and
-varies across ext4, XFS, APFS, and tmpfs. Sorting entries for strict
-FIFO would cost O(n) per pop, a price most workloads never need to pay.
-Under multi-consumer contention, ordering is already non-deterministic:
-multiple consumers race on `rename(2)`, so who gets which message
-depends on scheduling. If your workflow requires ordered processing,
-enforce it at the application layer — sequence numbers in headers,
-correlation IDs, or explicit dependencies between messages.
+`pop` sorts pending entries by filename — which embeds a fixed-width
+enqueue timestamp — and claims the oldest first. A single consumer gets
+strict FIFO. Under multi-consumer contention, all consumers attempt the
+oldest message first; one wins the `rename(2)`, others fall through to
+the next-oldest. The cost is O(n log n) per pop, negligible for typical
+queue sizes (under 10ms even at 10K pending messages).
 
 ### Explicit over automatic
 

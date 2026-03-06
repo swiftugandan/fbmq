@@ -3,12 +3,12 @@
 set -euo pipefail
 
 FBMQ="${FBMQ:-./fbmq}"
-TMPDIR=$(mktemp -d /tmp/fbmq-test.XXXXXX)
-QUEUE="$TMPDIR/testq"
+TEST_TMPDIR=$(mktemp -d /tmp/fbmq-test.XXXXXX)
+QUEUE="$TEST_TMPDIR/testq"
 PASS=0
 FAIL=0
 
-cleanup() { rm -rf "$TMPDIR"; }
+cleanup() { rm -rf "$TEST_TMPDIR"; }
 trap cleanup EXIT
 
 pass() { PASS=$((PASS+1)); printf "  \033[32mPASS\033[0m %s\n" "$1"; }
@@ -60,7 +60,7 @@ $FBMQ init "$QUEUE" --max-pending 0 2>/dev/null
 # ── init --priority ──
 echo ""
 echo "── init --priority ──"
-PQUEUE="$TMPDIR/prioq"
+PQUEUE="$TEST_TMPDIR/prioq"
 $FBMQ init "$PQUEUE" --priority --max-pending 0 2>/dev/null
 [ -d "$PQUEUE/pending/0-critical" ] && pass "0-critical" || fail "0-critical"
 [ -d "$PQUEUE/pending/1-high" ]     && pass "1-high" || fail "1-high"
@@ -98,10 +98,10 @@ grep -q "Created-By: ci-server" "$FILE2" && pass "created_by" || fail "created_b
 # ── push from file ──
 echo ""
 echo "── push from file ──"
-echo "# File-based message" > "$TMPDIR/task.md"
-echo "" >> "$TMPDIR/task.md"
-echo "Do the thing." >> "$TMPDIR/task.md"
-ID3=$($FBMQ push "$QUEUE" "$TMPDIR/task.md")
+echo "# File-based message" > "$TEST_TMPDIR/task.md"
+echo "" >> "$TEST_TMPDIR/task.md"
+echo "Do the thing." >> "$TEST_TMPDIR/task.md"
+ID3=$($FBMQ push "$QUEUE" "$TEST_TMPDIR/task.md")
 FILE3=$(find_msg "$QUEUE/pending" "$ID3")
 [ -n "$FILE3" ] && pass "file push works" || fail "file push"
 
@@ -241,7 +241,7 @@ $FBMQ ack "$PQUEUE" "$CL_PRIO"
 # ── pop set correctness ──
 echo ""
 echo "── pop set correctness ──"
-FIFO_QUEUE="$TMPDIR/fifoq"
+FIFO_QUEUE="$TEST_TMPDIR/fifoq"
 $FBMQ init "$FIFO_QUEUE" 2>/dev/null
 
 # Push 3 messages
@@ -265,10 +265,14 @@ done
 
 assert_set_eq "pop: correct message set" "$ID_A" "$ID_B" "$ID_C" -- "${POP_ORDER[@]}"
 
+# Strict FIFO order check
+[ "${POP_ORDER[0]}" = "$ID_A" ] && [ "${POP_ORDER[1]}" = "$ID_B" ] && [ "${POP_ORDER[2]}" = "$ID_C" ] && \
+    pass "pop: FIFO order A→B→C" || fail "pop: FIFO order"
+
 # ── custom fields ──
 echo ""
 echo "── custom fields ──"
-cat > "$TMPDIR/custom.md" <<'BODY'
+cat > "$TEST_TMPDIR/custom.md" <<'BODY'
 # Custom test
 BODY
 
@@ -281,7 +285,7 @@ echo "$INSPECT_CUSTOM" | grep -q "ID:" && pass "custom msg created" || fail "cus
 # ── depth locking ──
 echo ""
 echo "── depth locking ──"
-LOCK_QUEUE="$TMPDIR/lockq"
+LOCK_QUEUE="$TEST_TMPDIR/lockq"
 $FBMQ init "$LOCK_QUEUE" 2>/dev/null
 # Push 10 messages concurrently and verify depth is consistent
 for i in $(seq 1 10); do
@@ -301,7 +305,7 @@ echo "$VER" | grep -q "fbmq 1.0.0" && pass "version output" || fail "version" "$
 # ── concurrent push (basic) ──
 echo ""
 echo "── concurrent push ──"
-CONC_QUEUE="$TMPDIR/concq"
+CONC_QUEUE="$TEST_TMPDIR/concq"
 $FBMQ init "$CONC_QUEUE" 2>/dev/null
 for i in $(seq 1 20); do
     echo "# Message $i" | $FBMQ push "$CONC_QUEUE" --no-fsync &
@@ -318,29 +322,29 @@ assert_eq "20" "$ACTUAL" "20 files on disk"
 echo ""
 echo "── parser edge cases ──"
 # Empty file
-touch "$TMPDIR/empty.md"
-$FBMQ inspect "$TMPDIR/empty.md" >/dev/null 2>&1 && pass "empty file parses" || fail "empty file"
+touch "$TEST_TMPDIR/empty.md"
+$FBMQ inspect "$TEST_TMPDIR/empty.md" >/dev/null 2>&1 && pass "empty file parses" || fail "empty file"
 
 # No-body file (headers only, no blank line separator)
-cat > "$TMPDIR/nohead.md" <<'EOF'
+cat > "$TEST_TMPDIR/nohead.md" <<'EOF'
 Just some text with no headers at all.
 EOF
-BODY_ONLY=$($FBMQ cat "$TMPDIR/nohead.md")
+BODY_ONLY=$($FBMQ cat "$TEST_TMPDIR/nohead.md")
 echo "$BODY_ONLY" | grep -q "Just some text" && pass "no-header file: body only" || fail "no-header file"
 
 # Oversized ID field (should be rejected by parser)
-cat > "$TMPDIR/bad_id.md" <<'EOF'
+cat > "$TEST_TMPDIR/bad_id.md" <<'EOF'
 Id: zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz
 Created-At: 2026-01-01T00:00:00Z
 
 body
 EOF
 RC_BAD=0
-$FBMQ inspect "$TMPDIR/bad_id.md" >/dev/null 2>&1 || RC_BAD=$?
+$FBMQ inspect "$TEST_TMPDIR/bad_id.md" >/dev/null 2>&1 || RC_BAD=$?
 [ "$RC_BAD" -ne 0 ] && pass "oversized ID rejected" || fail "oversized ID accepted"
 
 # Colon in body should not confuse parser
-cat > "$TMPDIR/colon.md" <<'EOF'
+cat > "$TEST_TMPDIR/colon.md" <<'EOF'
 Id: aaaabbbbccccddddaaaabbbbccccdddd
 Created-At: 2026-01-01T00:00:00Z
 Priority: normal
@@ -348,13 +352,13 @@ Retry-Count: 0
 
 Key: Value in body should be preserved
 EOF
-COLON_BODY=$($FBMQ cat "$TMPDIR/colon.md")
+COLON_BODY=$($FBMQ cat "$TEST_TMPDIR/colon.md")
 echo "$COLON_BODY" | grep -q "Key: Value in body" && pass "colon in body preserved" || fail "colon in body"
 
 # ── concurrent push (50 workers) ──
 echo ""
 echo "── concurrent push (50 workers) ──"
-CONC50_QUEUE="$TMPDIR/conc50q"
+CONC50_QUEUE="$TEST_TMPDIR/conc50q"
 $FBMQ init "$CONC50_QUEUE" 2>/dev/null
 for i in $(seq 1 50); do
     echo "# Concurrent $i" | $FBMQ push "$CONC50_QUEUE" --no-fsync &
@@ -368,7 +372,7 @@ assert_eq "50" "$CONC50_FILES" "50 concurrent pushes: files"
 # ── batch-fsync ──
 echo ""
 echo "── batch-fsync ──"
-BATCH_QUEUE="$TMPDIR/batchq"
+BATCH_QUEUE="$TEST_TMPDIR/batchq"
 $FBMQ init "$BATCH_QUEUE" 2>/dev/null
 
 # Push with --batch-fsync produces valid message
@@ -394,7 +398,7 @@ echo "# Both flags" | $FBMQ push "$BATCH_QUEUE" --batch-fsync --no-fsync >/dev/n
 # ── count-on-read depth ──
 echo ""
 echo "── count-on-read depth ──"
-COR_QUEUE="$TMPDIR/corq"
+COR_QUEUE="$TEST_TMPDIR/corq"
 $FBMQ init "$COR_QUEUE" 2>/dev/null
 echo "# msg1" | $FBMQ push "$COR_QUEUE" --no-fsync >/dev/null
 echo "# msg2" | $FBMQ push "$COR_QUEUE" --no-fsync >/dev/null
@@ -414,7 +418,7 @@ assert_eq "0" "$COR_DEPTH_ZERO" "count-on-read depth=0 after drain"
 # ── pop set correctness (12 messages) ──
 echo ""
 echo "── pop set correctness (12 messages) ──"
-FIFO12_QUEUE="$TMPDIR/fifo12q"
+FIFO12_QUEUE="$TEST_TMPDIR/fifo12q"
 $FBMQ init "$FIFO12_QUEUE" --max-pending 0 2>/dev/null
 
 declare -a FIFO12_IDS=()
@@ -437,6 +441,13 @@ done
 
 assert_set_eq "FIFO12: correct message set" "${FIFO12_IDS[@]}" -- "${FIFO12_POP[@]}"
 
+# Strict FIFO order check
+FIFO12_OK=true
+for i in $(seq 0 11); do
+    [ "${FIFO12_POP[$i]}" = "${FIFO12_IDS[$i]}" ] || FIFO12_OK=false
+done
+$FIFO12_OK && pass "FIFO12: strict FIFO order" || fail "FIFO12: order mismatch"
+
 # ── depth on nonexistent path (#4) ──
 echo ""
 echo "── depth error handling ──"
@@ -447,7 +458,7 @@ $FBMQ depth /nonexistent/path/to/queue >/dev/null 2>&1 || RC_DEPTH=$?
 # ── reap ignores malformed filenames (#5) ──
 echo ""
 echo "── reap malformed filename ──"
-REAP_QUEUE="$TMPDIR/reapq"
+REAP_QUEUE="$TEST_TMPDIR/reapq"
 $FBMQ init "$REAP_QUEUE" 2>/dev/null
 # Place a malformed file (non-numeric prefix) in processing/
 echo "# bogus" > "$REAP_QUEUE/processing/abc.deadbeef01234567890abcdef01234.md"
@@ -466,7 +477,7 @@ REAP_OUT=$($FBMQ reap "$REAP_QUEUE" -l 1 2>&1)
 # ── stress: push 50, pop all, reap, purge (#3) ──
 echo ""
 echo "── stress: push/pop/reap/purge ──"
-STRESS_QUEUE="$TMPDIR/stressq"
+STRESS_QUEUE="$TEST_TMPDIR/stressq"
 $FBMQ init "$STRESS_QUEUE" 2>/dev/null
 for i in $(seq 1 50); do
     echo "# Stress $i" | $FBMQ push "$STRESS_QUEUE" --no-fsync &
@@ -492,7 +503,7 @@ assert_eq "0" "$DONE_LEFT" "stress: done/ empty after purge"
 # ── nack returns correctly formatted filename (#9) ──
 echo ""
 echo "── nack filename format ──"
-NACK_QUEUE="$TMPDIR/nackq"
+NACK_QUEUE="$TEST_TMPDIR/nackq"
 $FBMQ init "$NACK_QUEUE" 2>/dev/null
 NACK_ID=$(echo "# Nack test" | $FBMQ push "$NACK_QUEUE" --no-fsync)
 NACK_CL=$($FBMQ pop "$NACK_QUEUE")
@@ -508,7 +519,7 @@ echo "$NACK_BASE" | grep -qE '^[0-9]+\.[0-9a-f]{32}\.md$' && pass "nack: filenam
 # ── timestamp stripping lifecycle ──
 echo ""
 echo "── timestamp stripping lifecycle ──"
-TS_STRIP_QUEUE="$TMPDIR/tsstripq"
+TS_STRIP_QUEUE="$TEST_TMPDIR/tsstripq"
 $FBMQ init "$TS_STRIP_QUEUE" 2>/dev/null
 
 # Push: pending/ should have <enqueue_ts>.<hash>.md
@@ -566,7 +577,7 @@ echo ""
 echo "── oversized field rejection ──"
 # Create a message file with a tags field > 1024 bytes
 LONG_TAGS=$(printf '%0*d' 1100 0 | tr '0' 'x')
-cat > "$TMPDIR/long_tags.md" <<EOF
+cat > "$TEST_TMPDIR/long_tags.md" <<EOF
 Id: aaaabbbbccccddddaaaabbbbccccdddd
 Created-At: 2026-01-01T00:00:00Z
 Priority: normal
@@ -576,13 +587,13 @@ Tags: $LONG_TAGS
 body
 EOF
 RC_LONG=0
-$FBMQ inspect "$TMPDIR/long_tags.md" >/dev/null 2>&1 || RC_LONG=$?
+$FBMQ inspect "$TEST_TMPDIR/long_tags.md" >/dev/null 2>&1 || RC_LONG=$?
 [ "$RC_LONG" -ne 0 ] && pass "oversized tags field rejected" || fail "oversized tags accepted"
 
 # ── .tmp/ orphan cleanup (#16) ──
 echo ""
 echo "── .tmp/ orphan cleanup ──"
-TMP_QUEUE="$TMPDIR/tmpcleanq"
+TMP_QUEUE="$TEST_TMPDIR/tmpcleanq"
 $FBMQ init "$TMP_QUEUE" 2>/dev/null
 # Place a stale orphan (old mtime) in .tmp/
 echo "# orphan" > "$TMP_QUEUE/.tmp/stale_orphan.md"
@@ -601,14 +612,14 @@ $FBMQ reap "$TMP_QUEUE" -l 1 2>/dev/null
 # ── concurrent pop (race contention) ──
 echo ""
 echo "── concurrent pop (race contention) ──"
-RACE_QUEUE="$TMPDIR/raceq"
+RACE_QUEUE="$TEST_TMPDIR/raceq"
 $FBMQ init "$RACE_QUEUE" 2>/dev/null
 # Push 20 messages
 for i in $(seq 1 20); do
     echo "# Race msg $i" | $FBMQ push "$RACE_QUEUE" --no-fsync >/dev/null
 done
 # Pop all 20 from 10 concurrent consumers — each pops in a loop
-RACE_DIR="$TMPDIR/race_results"
+RACE_DIR="$TEST_TMPDIR/race_results"
 mkdir -p "$RACE_DIR"
 for w in $(seq 1 10); do
     (
@@ -634,9 +645,9 @@ assert_eq "0" "$RACE_DEPTH" "concurrent pop: queue drained"
 # ── concurrent push+pop (simultaneous producers and consumers) ──
 echo ""
 echo "── concurrent push+pop ──"
-PUSHPOP_QUEUE="$TMPDIR/pushpopq"
+PUSHPOP_QUEUE="$TEST_TMPDIR/pushpopq"
 $FBMQ init "$PUSHPOP_QUEUE" 2>/dev/null
-PUSHPOP_DIR="$TMPDIR/pushpop_results"
+PUSHPOP_DIR="$TEST_TMPDIR/pushpop_results"
 mkdir -p "$PUSHPOP_DIR"
 # 5 producers push 10 messages each = 50 total
 for p in $(seq 1 5); do
@@ -674,7 +685,7 @@ assert_eq "50" "$PUSHPOP_TOTAL" "push+pop: no messages lost (consumed=$PUSHPOP_C
 # ── reap during active processing ──
 echo ""
 echo "── reap during active processing ──"
-REAP_RACE_QUEUE="$TMPDIR/reapraceq"
+REAP_RACE_QUEUE="$TEST_TMPDIR/reapraceq"
 $FBMQ init "$REAP_RACE_QUEUE" 2>/dev/null
 # Push 5 messages
 for i in $(seq 1 5); do
@@ -698,7 +709,7 @@ done
 # ── claim timestamp precision ──
 echo ""
 echo "── claim timestamp precision ──"
-TS_QUEUE="$TMPDIR/tsq"
+TS_QUEUE="$TEST_TMPDIR/tsq"
 $FBMQ init "$TS_QUEUE" 2>/dev/null
 echo "# Timestamp test" | $FBMQ push "$TS_QUEUE" --no-fsync >/dev/null
 TS_CL=$($FBMQ pop "$TS_QUEUE")
@@ -713,7 +724,7 @@ $FBMQ ack "$TS_QUEUE" "$TS_CL"
 # ── depth full-scan correctness ──
 echo ""
 echo "── depth full-scan correctness ──"
-DEPTH_QUEUE="$TMPDIR/depthq"
+DEPTH_QUEUE="$TEST_TMPDIR/depthq"
 $FBMQ init "$DEPTH_QUEUE" 2>/dev/null
 for i in $(seq 1 100); do
     echo "# Depth msg $i" | $FBMQ push "$DEPTH_QUEUE" --no-fsync >/dev/null &
@@ -726,7 +737,7 @@ assert_eq "$DEPTH_FILES" "$DEPTH_REPORT" "depth matches file count for 100 messa
 # ── reap with >64 processing entries ──
 echo ""
 echo "── reap with >64 processing entries ──"
-REAP64_QUEUE="$TMPDIR/reap64q"
+REAP64_QUEUE="$TEST_TMPDIR/reap64q"
 $FBMQ init "$REAP64_QUEUE" 2>/dev/null
 for i in $(seq 1 70); do
     echo "# Reap64 msg $i" | $FBMQ push "$REAP64_QUEUE" --no-fsync >/dev/null &
@@ -757,7 +768,7 @@ assert_eq "0" "$PROC_LEFT" "reap64: processing/ empty after reap (all 70 reaped)
 # ── fbmq-reaper script ──
 echo ""
 echo "── fbmq-reaper script ──"
-REAPER_QUEUE="$TMPDIR/reaperq"
+REAPER_QUEUE="$TEST_TMPDIR/reaperq"
 $FBMQ init "$REAPER_QUEUE" 2>/dev/null
 echo "# Reaper test" | $FBMQ push "$REAPER_QUEUE" --no-fsync >/dev/null
 REAPER_CL=$($FBMQ pop "$REAPER_QUEUE")
@@ -780,7 +791,7 @@ FBMQ="$FBMQ" sh scripts/fbmq-reaper /nonexistent/queue 1 1 2>/dev/null || REAPER
 # ── max-pending enforcement ──
 echo ""
 echo "── max-pending enforcement ──"
-MAXP_QUEUE="$TMPDIR/maxpq"
+MAXP_QUEUE="$TEST_TMPDIR/maxpq"
 $FBMQ init "$MAXP_QUEUE" --max-pending 3 2>/dev/null
 echo "# msg1" | $FBMQ push "$MAXP_QUEUE" --no-fsync >/dev/null
 echo "# msg2" | $FBMQ push "$MAXP_QUEUE" --no-fsync >/dev/null
@@ -801,7 +812,7 @@ assert_eq "0" "$MAXP_RC2" "max-pending: push succeeds after pop"
 # ── max-pending unlimited ──
 echo ""
 echo "── max-pending unlimited ──"
-MAXPU_QUEUE="$TMPDIR/maxpuq"
+MAXPU_QUEUE="$TEST_TMPDIR/maxpuq"
 $FBMQ init "$MAXPU_QUEUE" --max-pending 0 2>/dev/null
 for i in $(seq 1 50); do
     echo "# Unlimited $i" | $FBMQ push "$MAXPU_QUEUE" --no-fsync >/dev/null
@@ -812,7 +823,7 @@ assert_eq "50" "$MAXPU_DEPTH" "max-pending unlimited: 50 messages pushed"
 # ── reap real nanosecond timestamps ──
 echo ""
 echo "── reap real nanosecond timestamps ──"
-REAP_NS_QUEUE="$TMPDIR/reapnsq"
+REAP_NS_QUEUE="$TEST_TMPDIR/reapnsq"
 $FBMQ init "$REAP_NS_QUEUE" 2>/dev/null
 echo "# NS reap test" | $FBMQ push "$REAP_NS_QUEUE" --no-fsync >/dev/null
 REAP_NS_CL=$($FBMQ pop "$REAP_NS_QUEUE")
@@ -829,7 +840,7 @@ $FBMQ reap "$REAP_NS_QUEUE" -l 1 2>/dev/null
 # ── empty purge ──
 echo ""
 echo "── empty purge ──"
-EPURGE_QUEUE="$TMPDIR/epurgeq"
+EPURGE_QUEUE="$TEST_TMPDIR/epurgeq"
 $FBMQ init "$EPURGE_QUEUE" 2>/dev/null
 RC_EPURGE=0
 $FBMQ purge "$EPURGE_QUEUE" -a 0 2>/dev/null || RC_EPURGE=$?
@@ -838,7 +849,7 @@ assert_eq "0" "$RC_EPURGE" "empty purge: exits 0"
 # ── nack atomicity (.tmp/ clean after nack) ──
 echo ""
 echo "── nack atomicity ──"
-NATOM_QUEUE="$TMPDIR/natomq"
+NATOM_QUEUE="$TEST_TMPDIR/natomq"
 $FBMQ init "$NATOM_QUEUE" 2>/dev/null
 echo "# Nack atomicity test" | $FBMQ push "$NATOM_QUEUE" --no-fsync >/dev/null
 NATOM_CL=$($FBMQ pop "$NATOM_QUEUE")
@@ -849,7 +860,7 @@ assert_eq "0" "$NATOM_TMP_COUNT" "nack atomicity: no leftover in .tmp/"
 # ── corrupt max_pending warning ──
 echo ""
 echo "── corrupt max_pending warning ──"
-CORRUPT_QUEUE="$TMPDIR/corruptq"
+CORRUPT_QUEUE="$TEST_TMPDIR/corruptq"
 $FBMQ init "$CORRUPT_QUEUE" 2>/dev/null
 echo "not-a-number" > "$CORRUPT_QUEUE/.meta/max_pending"
 CORRUPT_STDERR=$(echo "# test" | $FBMQ push "$CORRUPT_QUEUE" --no-fsync 2>&1 >/dev/null)
@@ -859,7 +870,7 @@ echo "$CORRUPT_STDERR" | grep -q "warning" && pass "corrupt max_pending: warning
 # ── nack no-loss (push A, push B, pop, nack, pop all → both consumed) ──
 echo ""
 echo "── nack no-loss ──"
-NFIFO_QUEUE="$TMPDIR/nfifoq"
+NFIFO_QUEUE="$TEST_TMPDIR/nfifoq"
 $FBMQ init "$NFIFO_QUEUE" --max-pending 0 2>/dev/null
 NFIFO_A=$(echo "# Message A" | $FBMQ push "$NFIFO_QUEUE" --no-fsync)
 sleep 0.1
@@ -881,7 +892,7 @@ assert_set_eq "nack-noloss: correct message set" "$NFIFO_A" "$NFIFO_B" -- "${NFI
 # ── reap: orphan detection with timestamp-prefixed pending entries ──
 echo ""
 echo "── reap: orphan detection with timestamp-prefixed pending ──"
-ORPHAN_QUEUE="$TMPDIR/orphanq"
+ORPHAN_QUEUE="$TEST_TMPDIR/orphanq"
 $FBMQ init "$ORPHAN_QUEUE" 2>/dev/null
 # Push a message and pop it to get a valid message file
 echo "# Orphan test" | $FBMQ push "$ORPHAN_QUEUE" --no-fsync >/dev/null
@@ -906,14 +917,14 @@ assert_eq "1" "$ORPHAN_PEND_COUNT" "reap orphan: pending/ copy preserved"
 # ── concurrent pop: no restart thundering herd ──
 echo ""
 echo "── concurrent pop: heavy contention ──"
-HERD_QUEUE="$TMPDIR/herdq"
+HERD_QUEUE="$TEST_TMPDIR/herdq"
 $FBMQ init "$HERD_QUEUE" 2>/dev/null
 # Push 50 messages
 for i in $(seq 1 50); do
     echo "# Herd msg $i" | $FBMQ push "$HERD_QUEUE" --no-fsync >/dev/null
 done
 # Pop all 50 from 20 concurrent consumers
-HERD_DIR="$TMPDIR/herd_results"
+HERD_DIR="$TEST_TMPDIR/herd_results"
 mkdir -p "$HERD_DIR"
 for w in $(seq 1 20); do
     (
@@ -935,6 +946,56 @@ done
 assert_eq "50" "$HERD_TOTAL" "heavy contention: all 50 claimed exactly once"
 HERD_DEPTH=$($FBMQ depth "$HERD_QUEUE")
 assert_eq "0" "$HERD_DEPTH" "heavy contention: queue drained"
+
+# ── depends-on + ready ──
+echo ""
+echo "── depends-on + ready ──"
+DEP_QUEUE="$TEST_TMPDIR/depq"
+$FBMQ init "$DEP_QUEUE" --max-pending 0 2>/dev/null
+
+# Push A (no deps), B (depends on A), C (depends on A + B), D (no deps)
+A=$(echo "task A" | $FBMQ push "$DEP_QUEUE")
+B=$(echo "task B" | $FBMQ push "$DEP_QUEUE" -d "$A")
+C=$(echo "task C" | $FBMQ push "$DEP_QUEUE" -d "$A" -d "$B")
+D=$(echo "task D" | $FBMQ push "$DEP_QUEUE")
+
+# Verify Depends-On header is serialized in message files
+B_FILE=$(find_msg "$DEP_QUEUE/pending" "$B")
+grep -q "Depends-On: $A" "$B_FILE" && pass "depends-on: header serialized (single dep)" || fail "depends-on: header serialized (single dep)"
+
+C_FILE=$(find_msg "$DEP_QUEUE/pending" "$C")
+grep -q "Depends-On: $A, $B" "$C_FILE" && pass "depends-on: header serialized (multi dep)" || fail "depends-on: header serialized (multi dep)"
+
+# Verify inspect shows Depends-On
+INSPECT_OUT=$($FBMQ inspect "$B_FILE")
+echo "$INSPECT_OUT" | grep -q "Depends-On:" && pass "depends-on: inspect displays header" || fail "depends-on: inspect displays header"
+
+# Verify ready lists only A and D initially
+READY_IDS=$($FBMQ ready "$DEP_QUEUE")
+echo "$READY_IDS" | grep -q "$A" && pass "ready: A is ready (no deps)" || fail "ready: A is ready (no deps)"
+echo "$READY_IDS" | grep -q "$D" && pass "ready: D is ready (no deps)" || fail "ready: D is ready (no deps)"
+echo "$READY_IDS" | grep -q "$B" && fail "ready: B should not be ready" || pass "ready: B not ready (dep A unmet)"
+echo "$READY_IDS" | grep -q "$C" && fail "ready: C should not be ready" || pass "ready: C not ready (deps unmet)"
+
+# Simulate completing A by moving its pending file to done/
+A_PEND=$(find_msg "$DEP_QUEUE/pending" "$A")
+mv "$A_PEND" "$DEP_QUEUE/done/${A}.md"
+READY_IDS2=$($FBMQ ready "$DEP_QUEUE")
+echo "$READY_IDS2" | grep -q "$B" && pass "ready: B ready after A done" || fail "ready: B ready after A done"
+echo "$READY_IDS2" | grep -q "$C" && fail "ready: C should not be ready (B unmet)" || pass "ready: C not ready (B unmet)"
+
+# Simulate completing B
+B_PEND=$(find_msg "$DEP_QUEUE/pending" "$B")
+mv "$B_PEND" "$DEP_QUEUE/done/${B}.md"
+READY_IDS3=$($FBMQ ready "$DEP_QUEUE")
+echo "$READY_IDS3" | grep -q "$C" && pass "ready: C ready after A+B done" || fail "ready: C ready after A+B done"
+
+# Simulate completing C and D, then check exit code
+C_PEND=$(find_msg "$DEP_QUEUE/pending" "$C")
+mv "$C_PEND" "$DEP_QUEUE/done/${C}.md"
+D_PEND=$(find_msg "$DEP_QUEUE/pending" "$D")
+mv "$D_PEND" "$DEP_QUEUE/done/${D}.md"
+$FBMQ ready "$DEP_QUEUE" >/dev/null 2>&1 && fail "ready: exit 0 on empty queue" || pass "ready: exit 1 when no ready msgs"
 
 # ── Summary ──
 echo ""
